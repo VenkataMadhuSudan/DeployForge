@@ -1,0 +1,316 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum OrgRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum ProjectRole {
+  ADMIN
+  DEVELOPER
+  VIEWER
+}
+
+enum ProjectFramework {
+  STATIC
+  REACT_VITE
+  NEXTJS
+}
+
+enum HostingProviderType {
+  LOCAL_TESTING
+  CLOUDFLARE_PAGES
+  AWS_S3
+}
+
+enum DeploymentStatus {
+  QUEUED
+  PREPARING
+  BUILDING
+  DEPLOYING
+  HEALTH_CHECKING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum TriggerType {
+  MANUAL
+  WEBHOOK
+  REDEPLOY
+  ROLLBACK
+}
+
+enum LogLevel {
+  INFO
+  WARN
+  ERROR
+  DEBUG
+}
+
+enum BuildStage {
+  PREPARE
+  INSTALL
+  BUILD
+  DEPLOY
+  SYSTEM
+}
+
+enum EnvironmentScope {
+  PRODUCTION
+  PREVIEW
+  ALL
+}
+
+enum WebhookProcessingStatus {
+  PENDING
+  PROCESSED
+  IGNORED
+  FAILED
+}
+
+enum OutboxStatus {
+  PENDING
+  DISPATCHED
+  FAILED
+}
+
+model User {
+  id           String        @id @default(uuid())
+  email        String        @unique
+  passwordHash String
+  name         String?
+  role         UserRole      @default(USER)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  ownedProjects           Project[]                 @relation("ProjectOwner")
+  orgMemberships          OrganizationMember[]
+  projectMemberships      ProjectMember[]
+  deploymentsRequested    Deployment[]              @relation("DeploymentRequester")
+  repositoryIntegrations  RepositoryIntegration[]
+  auditLogs               AuditLog[]                @relation("ActorAuditLogs")
+
+  @@index([email])
+}
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members  OrganizationMember[]
+  projects Project[]
+
+  @@index([slug])
+}
+
+model OrganizationMember {
+  id             String       @id @default(uuid())
+  organizationId String
+  userId         String
+  role           OrgRole      @default(MEMBER)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+}
+
+model Project {
+  id                 String              @id @default(uuid())
+  name               String
+  slug               String
+  ownerId            String
+  organizationId     String?
+  repoProvider       String              @default("GITHUB")
+  repoId             String?
+  repoUrl            String
+  repoOwner          String
+  repoName           String
+  defaultBranch      String              @default("main")
+  framework          ProjectFramework    @default(STATIC)
+  buildCommand       String?
+  installCommand     String?
+  outputDirectory    String              @default("dist")
+  deploymentProvider HostingProviderType @default(LOCAL_TESTING)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  owner                User                  @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  organization         Organization?         @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  members              ProjectMember[]
+  deployments          Deployment[]
+  environmentVariables EnvironmentVariable[]
+  auditLogs            AuditLog[]
+
+  @@unique([ownerId, slug])
+  @@index([ownerId])
+  @@index([repoOwner, repoName])
+}
+
+model ProjectMember {
+  id        String      @id @default(uuid())
+  projectId String
+  userId    String
+  role      ProjectRole @default(DEVELOPER)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@index([userId])
+}
+
+model RepositoryIntegration {
+  id             String   @id @default(uuid())
+  provider       String   @default("GITHUB")
+  userId         String
+  installationId String
+  accountLogin   String
+  accountId      String?
+  metadata       String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, installationId])
+  @@index([userId])
+}
+
+model Deployment {
+  id                   String           @id @default(uuid())
+  projectId            String
+  commitSha            String
+  commitMessage        String?
+  branch               String           @default("main")
+  status               DeploymentStatus @default(QUEUED)
+  triggerType          TriggerType      @default(MANUAL)
+  requestedById        String?
+  provider             String           @default("LOCAL_TESTING")
+  providerDeploymentId String?
+  deploymentUrl        String?
+  errorCode            String?
+  errorMessage         String?
+  startedAt            DateTime?
+  completedAt          DateTime?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+
+  project       Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  requestedBy   User?           @relation("DeploymentRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+  logs          DeploymentLog[]
+  buildArtifact BuildArtifact?
+
+  @@index([projectId, createdAt(sort: Desc)])
+  @@index([commitSha])
+  @@index([status])
+}
+
+model DeploymentLog {
+  id             String     @id @default(uuid())
+  deploymentId   String
+  sequenceNumber Int
+  level          LogLevel   @default(INFO)
+  stage          BuildStage @default(BUILD)
+  message        String
+  timestamp      DateTime   @default(now())
+
+  deployment Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  @@index([deploymentId, sequenceNumber])
+}
+
+model EnvironmentVariable {
+  id             String           @id @default(uuid())
+  projectId      String
+  environment    EnvironmentScope @default(ALL)
+  key            String
+  encryptedValue String
+  isSecret       Boolean          @default(true)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, environment, key])
+  @@index([projectId])
+}
+
+model WebhookEvent {
+  id               String                  @id @default(uuid())
+  provider         String                  @default("GITHUB")
+  deliveryId       String
+  eventType        String
+  processingStatus WebhookProcessingStatus @default(PENDING)
+  payload          String
+  receivedAt       DateTime                @default(now())
+  processedAt      DateTime?
+
+  @@unique([provider, deliveryId])
+  @@index([receivedAt])
+}
+
+model AuditLog {
+  id             String   @id @default(uuid())
+  actorId        String?
+  organizationId String?
+  projectId      String?
+  action         String
+  resourceType   String
+  resourceId     String
+  metadata       String?
+  ipAddress      String?
+  timestamp      DateTime @default(now())
+
+  actor   User?    @relation("ActorAuditLogs", fields: [actorId], references: [id], onDelete: SetNull)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, timestamp(sort: Desc)])
+  @@index([actorId])
+}
+
+model BuildArtifact {
+  id             String   @id @default(uuid())
+  deploymentId   String   @unique
+  storagePath    String
+  checksumSha256 String
+  sizeBytes      BigInt
+  fileCount      Int
+  createdAt      DateTime @default(now())
+
+  deployment Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+}
+
+model OutboxEvent {
+  id           String       @id @default(uuid())
+  eventType    String
+  payload      String
+  status       OutboxStatus @default(PENDING)
+  retryCount   Int          @default(0)
+  createdAt    DateTime     @default(now())
+  dispatchedAt DateTime?
+
+  @@index([status, createdAt])
+}

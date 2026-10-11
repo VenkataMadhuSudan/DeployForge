@@ -1,0 +1,31 @@
+{
+  "name": "@deployforge/worker",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@deployforge/configuration": "workspace:*",
+    "@deployforge/database": "workspace:*",
+    "@deployforge/logging": "workspace:*",
+    "@deployforge/shared-types": "workspace:*",
+    "@prisma/client": "^6.3.1",
+    "bullmq": "^5.40.4",
+    "dockerode": "^4.0.2",
+    "dotenv": "^16.4.7",
+    "ioredis": "^5.4.2"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^3.3.34",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.13.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "deployforge-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DeployForge - Automated Website Deployment and Management Platform",
+  "packageManager": "pnpm@10.5.2",
+  "scripts": {
+    "build": "pnpm --filter \"./packages/*\" build && pnpm --filter \"./apps/*\" build",
+    "dev": "pnpm --parallel dev",
+    "dev:api": "pnpm --filter @deployforge/api dev",
+    "dev:worker": "pnpm --filter @deployforge/worker dev",
+    "dev:web": "pnpm --filter @deployforge/web dev",
+    "lint": "pnpm --recursive lint",
+    "test": "pnpm --recursive test",
+    "db:generate": "pnpm --filter @deployforge/database generate",
+    "db:migrate": "pnpm --filter @deployforge/database migrate",
+    "db:push": "pnpm --filter @deployforge/database push",
+    "db:seed": "pnpm --filter @deployforge/database seed"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "typescript": "^5.7.3",
+    "rimraf": "^6.0.1"
+  }
+}

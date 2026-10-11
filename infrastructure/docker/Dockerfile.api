@@ -1,0 +1,20 @@
+FROM node:20-alpine AS base
+RUN corepack enable && corepack prepare pnpm@10.5.2 --activate
+WORKDIR /app
+
+FROM base AS builder
+COPY . .
+RUN pnpm install --frozen-lockfile || pnpm install
+RUN pnpm --filter @deployforge/database generate
+RUN pnpm --filter @deployforge/shared-types build
+RUN pnpm --filter @deployforge/configuration build
+RUN pnpm --filter @deployforge/logging build
+RUN pnpm --filter @deployforge/validation build
+RUN pnpm --filter @deployforge/database build
+RUN pnpm --filter @deployforge/api build
+
+FROM base AS runner
+WORKDIR /app
+COPY --from=builder /app ./
+EXPOSE 4000
+CMD ["pnpm", "--filter", "@deployforge/api", "start"]

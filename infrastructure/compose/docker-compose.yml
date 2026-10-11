@@ -1,0 +1,116 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: deployforge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: deployforge
+      POSTGRES_PASSWORD: deployforge_secret
+      POSTGRES_DB: deployforge_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deployforge -d deployforge_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - deployforge-internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: deployforge-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - deployforge-internal
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.api
+    container_name: deployforge-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://deployforge:deployforge_secret@postgres:5432/deployforge_db?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: production_jwt_secret_deployforge_secure_32_chars_long
+      ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      PUBLIC_APP_URL: http://localhost:3000
+      PUBLIC_API_URL: http://localhost:4000
+      HOSTING_PROVIDER: LOCAL_TESTING
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - deployforge-internal
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.worker
+    container_name: deployforge-worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://deployforge:deployforge_secret@postgres:5432/deployforge_db?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      HOSTING_PROVIDER: LOCAL_TESTING
+      BUILD_WORKSPACE_DIR: /app/storage/workspaces
+      ARTIFACT_STORAGE_DIR: /app/storage/artifacts
+    volumes:
+      - storage_data:/app/storage
+      # Worker can invoke Docker via socket only when running on Linux host with proper group permissions
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - deployforge-internal
+
+  web:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.web
+    container_name: deployforge-web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: http://localhost:4000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    networks:
+      - deployforge-internal
+
+networks:
+  deployforge-internal:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  storage_data:

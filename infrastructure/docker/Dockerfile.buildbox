@@ -1,0 +1,21 @@
+FROM node:20-alpine
+
+# Install build dependencies
+RUN apk add --no-cache git bash ca-certificates
+
+# Create unprivileged build user
+RUN addgroup -g 10001 builduser && \
+    adduser -u 10001 -G builduser -s /bin/sh -D builduser
+
+# Workspace directory
+WORKDIR /workspace
+RUN chown -R builduser:builduser /workspace
+
+# Run as non-root
+USER builduser
+
+ENV CI=true
+ENV NODE_ENV=production
+
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["echo 'Isolated Build Environment Ready'"]

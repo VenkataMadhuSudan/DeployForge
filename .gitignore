@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build artifacts
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# Environment and secrets
+.env
+.env.local
+.env.production
+*.pem
+*.key
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# Runtime and storage
+storage/
+storage/workspaces/
+storage/artifacts/
+storage/deployments/
+
+# OS and Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Testing and coverage
+coverage/
+.nyc_output/
