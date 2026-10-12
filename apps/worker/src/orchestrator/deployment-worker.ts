@@ -10,7 +10,7 @@ import {
   DeploymentStatus,
 } from '@deployforge/shared-types';
 import { SecretRedactor, AppLogger } from '@deployforge/logging';
-import { loadConfig, decryptSecret } from '@deployforge/configuration';
+import { loadConfig, decryptSecret, getRedisConnectionOptions } from '@deployforge/configuration';
 import { createBuildExecutor } from '../executors/build-executor';
 import { detectFramework } from '../frameworks/framework-detector';
 import { createHostingProvider } from '../providers/provider-factory';
@@ -28,11 +28,7 @@ export class DeploymentWorkerService {
         await this.processDeploymentJob(job);
       },
       {
-        connection: {
-          host: config.REDIS_HOST,
-          port: config.REDIS_PORT,
-          password: config.REDIS_PASSWORD || undefined,
-        },
+        connection: getRedisConnectionOptions(config),
         concurrency: 2,
         lockDuration: 60000,
       }

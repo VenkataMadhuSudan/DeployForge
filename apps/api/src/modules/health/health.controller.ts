@@ -1,7 +1,7 @@
 import { Controller, Get } from '@nestjs/common';
 import { prisma } from '@deployforge/database';
 import Redis from 'ioredis';
-import { loadConfig } from '@deployforge/configuration';
+import { loadConfig, getRedisConnectionOptions } from '@deployforge/configuration';
 
 @Controller('health')
 export class HealthController {
@@ -21,10 +21,9 @@ export class HealthController {
 
     // 2. Check Redis
     try {
+      const redisOpts = getRedisConnectionOptions(config);
       const redis = new Redis({
-        host: config.REDIS_HOST,
-        port: config.REDIS_PORT,
-        password: config.REDIS_PASSWORD || undefined,
+        ...redisOpts,
         connectTimeout: 2000,
         maxRetriesPerRequest: 1,
       });

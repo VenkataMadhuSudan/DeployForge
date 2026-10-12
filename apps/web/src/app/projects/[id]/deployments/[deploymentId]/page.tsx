@@ -4,7 +4,53 @@ import { useEffect, useState, useRef, use } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { apiRequest } from '@/lib/api-client';
-import { SafeDeploymentSummary, SafeDeploymentLog } from '@deployforge/shared-types';
+import { SafeDeploymentSummary, SafeDeploymentLog, BuildStage, DeploymentStatus } from '@deployforge/shared-types';
+
+function StatusBadge({ status }: { status?: string }) {
+  const map: Record<string, { cls: string; label: string }> = {
+    SUCCEEDED:   { cls: 'badge-success', label: '● Succeeded' },
+    FAILED:      { cls: 'badge-danger',  label: '✕ Failed' },
+    QUEUED:      { cls: 'badge-warning', label: 'Queued' },
+    BUILDING:    { cls: 'badge-info badge-pulse', label: 'Building' },
+    DEPLOYING:   { cls: 'badge-info badge-pulse', label: 'Deploying' },
+    PREPARING:   { cls: 'badge-info badge-pulse', label: 'Preparing' },
+    CANCELLED:   { cls: 'badge-neutral', label: 'Cancelled' },
+    ROLLED_BACK: { cls: 'badge-neutral', label: 'Rolled Back' },
+  };
+  const s = status || 'QUEUED';
+  const { cls, label } = map[s] ?? { cls: 'badge-neutral', label: s };
+  return <span className={`badge text-sm px-3 py-1 ${cls}`}>{label}</span>;
+}
+
+function LogLine({ log }: { log: SafeDeploymentLog }) {
+  const lvl = log.level?.toLowerCase() ?? 'info';
+  const lineClass =
+    lvl === 'error' ? 'log-line error' :
+    lvl === 'warn'  ? 'log-line warning' :
+    log.stage === BuildStage.DEPLOY ? 'log-line success' :
+    log.stage === BuildStage.PREPARE ? 'log-line header' :
+    'log-line info';
+
+  const stagePill =
+    lvl === 'error'   ? { bg: 'rgba(248,113,113,0.15)', color: '#f87171' } :
+    lvl === 'warn'    ? { bg: 'rgba(251,191,36,0.15)',  color: '#fbbf24' } :
+    { bg: 'rgba(255,255,255,0.05)', color: 'var(--text-muted)' };
+
+  return (
+    <div className="flex items-start gap-3 px-1 py-0.5 rounded hover:bg-white/[0.025] transition-colors">
+      <span className="text-[11px] select-none shrink-0 w-20 tabular-nums" style={{ color: 'var(--text-muted)' }}>
+        {new Date(log.timestamp).toLocaleTimeString()}
+      </span>
+      <span
+        className="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded select-none shrink-0"
+        style={{ background: stagePill.bg, color: stagePill.color }}
+      >
+        {log.stage || 'BUILD'}
+      </span>
+      <span className={lineClass} style={{ flex: 1 }}>{log.message}</span>
+    </div>
+  );
+}
 
 export default function DeploymentLogsPage({
   params,
@@ -18,14 +64,19 @@ export default function DeploymentLogsPage({
   const [error, setError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [rollingBack, setRollingBack] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
   const lastSeqRef = useRef<number>(0);
   const logContainerRef = useRef<HTMLDivElement>(null);
+
+  const isTerminalState =
+    deployment?.status === DeploymentStatus.SUCCEEDED ||
+    deployment?.status === DeploymentStatus.FAILED ||
+    deployment?.status === DeploymentStatus.CANCELLED;
 
   useEffect(() => {
     fetchDeployment();
     fetchLogs();
 
-    // Poll logs every 1.5 seconds if active
     const interval = setInterval(() => {
       fetchDeployment();
       fetchLogs();
@@ -35,11 +86,10 @@ export default function DeploymentLogsPage({
   }, [resolvedParams.id, resolvedParams.deploymentId]);
 
   useEffect(() => {
-    // Auto-scroll to bottom of logs
-    if (logContainerRef.current) {
+    if (autoScroll && logContainerRef.current) {
       logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
     }
-  }, [logs]);
+  }, [logs, autoScroll]);
 
   const fetchDeployment = async () => {
     try {
@@ -64,25 +114,24 @@ export default function DeploymentLogsPage({
         }
       }
     } catch {
-      // ignore transient polling errors
+      // ignore polling errors
     }
   };
 
   const handleCancel = async () => {
     setCancelling(true);
     try {
-      await apiRequest(`/projects/${resolvedParams.id}/deployments/${resolvedParams.deploymentId}/cancel`, {
-        method: 'POST',
-      });
+      await apiRequest(`/projects/${resolvedParams.id}/deployments/${resolvedParams.deploymentId}/cancel`, { method: 'POST' });
       fetchDeployment();
     } catch (err: any) {
-      alert(`Cancel failed: ${err.message}`);
+      setError(`Cancel failed: ${err.message}`);
     } finally {
       setCancelling(false);
     }
   };
 
   const handleRollback = async () => {
+    if (!confirm('Roll back to this deployment? A new deployment record will be created.')) return;
     setRollingBack(true);
     try {
       const rolled = await apiRequest<SafeDeploymentSummary>(
@@ -91,133 +140,204 @@ export default function DeploymentLogsPage({
       );
       router.push(`/projects/${resolvedParams.id}/deployments/${rolled.id}`);
     } catch (err: any) {
-      alert(`Rollback failed: ${err.message}`);
+      setError(`Rollback failed: ${err.message}`);
       setRollingBack(false);
     }
   };
 
-  const isTerminalState =
-    deployment?.status === 'SUCCEEDED' ||
-    deployment?.status === 'FAILED' ||
-    deployment?.status === 'CANCELLED';
+  // Duration calculation
+  const duration = (() => {
+    if (!deployment?.createdAt) return null;
+    const end = deployment.completedAt ? new Date(deployment.completedAt) : new Date();
+    const diff = Math.floor((end.getTime() - new Date(deployment.createdAt).getTime()) / 1000);
+    const m = Math.floor(diff / 60);
+    const s = diff % 60;
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  })();
 
   return (
-    <div className="space-y-6">
-      {/* Breadcrumb & Navigation */}
-      <div className="flex items-center space-x-2 text-xs text-slate-400">
-        <Link href={`/projects/${resolvedParams.id}`} className="hover:text-white transition">
-          &larr; Back to Project
+    <div className="space-y-5 animate-fade-in">
+
+      {/* ── Breadcrumb ────────────────────────────────────────── */}
+      <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--text-muted)' }}>
+        <Link
+          href={`/projects/${resolvedParams.id}`}
+          style={{ color: 'var(--text-secondary)', textDecoration: 'none' }}
+          className="hover:text-white transition"
+        >
+          ← Project
         </Link>
         <span>/</span>
-        <span className="text-slate-200">Deployment {resolvedParams.deploymentId.substring(0, 8)}</span>
+        <span className="font-mono" style={{ color: 'var(--text-primary)' }}>
+          {resolvedParams.deploymentId.substring(0, 8)}
+        </span>
       </div>
 
-      {/* Header Info Card */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+      {/* ── Info card ─────────────────────────────────────────── */}
+      <div
+        className="glass-card p-5 flex flex-col md:flex-row md:items-center justify-between gap-4"
+        style={{ borderRadius: '16px' }}
+      >
         <div>
-          <div className="flex items-center space-x-3">
-            <h1 className="text-xl font-bold text-white">Deployment Status</h1>
-            <span
-              className={`px-3 py-1 rounded-full text-xs font-semibold ${
-                deployment?.status === 'SUCCEEDED'
-                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                  : deployment?.status === 'FAILED'
-                  ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                  : 'bg-sky-500/10 text-sky-400 border border-sky-500/20 animate-pulse'
-              }`}
-            >
-              {deployment?.status || 'LOADING'}
-            </span>
+          <div className="flex items-center gap-3 flex-wrap">
+            <h1 className="text-xl font-bold" style={{ color: 'var(--text-primary)' }}>
+              Deployment
+            </h1>
+            <StatusBadge status={deployment?.status} />
+            {!isTerminalState && (
+              <span className="text-xs animate-pulse" style={{ color: 'var(--text-muted)' }}>
+                (polling…)
+              </span>
+            )}
           </div>
 
-          <div className="mt-2 text-xs text-slate-400 font-mono space-y-1">
-            <p>Commit: {deployment?.commitSha} ({deployment?.branch})</p>
+          <div className="mt-2 space-y-1 text-xs font-mono" style={{ color: 'var(--text-secondary)' }}>
+            {deployment?.commitSha && (
+              <p>
+                <span style={{ color: 'var(--text-muted)' }}>commit </span>
+                <span style={{ color: 'var(--accent)' }}>{deployment.commitSha.substring(0, 12)}</span>
+                <span style={{ color: 'var(--text-muted)' }}> on </span>
+                <span>{deployment.branch}</span>
+              </p>
+            )}
+            {deployment?.commitMessage && (
+              <p style={{ color: 'var(--text-secondary)' }}>{deployment.commitMessage}</p>
+            )}
+            {duration && (
+              <p style={{ color: 'var(--text-muted)' }}>Duration: {duration}</p>
+            )}
             {deployment?.deploymentUrl && (
               <p>
-                Live URL:{' '}
                 <a
                   href={deployment.deploymentUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-sky-400 hover:underline"
+                  className="hover:underline"
+                  style={{ color: 'var(--success)' }}
                 >
-                  {deployment.deploymentUrl} &nearr;
+                  ↗ {deployment.deploymentUrl}
                 </a>
               </p>
             )}
           </div>
         </div>
 
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center gap-2 flex-shrink-0">
           {!isTerminalState && (
             <button
+              id="cancel-deployment-btn"
               onClick={handleCancel}
               disabled={cancelling}
-              className="px-3.5 py-1.5 bg-rose-600/20 text-rose-300 border border-rose-500/30 hover:bg-rose-600/30 rounded-lg text-xs font-medium transition disabled:opacity-50"
+              className="btn btn-danger text-xs"
             >
-              {cancelling ? 'Cancelling...' : 'Cancel Build'}
+              {cancelling ? 'Cancelling…' : 'Cancel Build'}
             </button>
           )}
-
           {deployment?.status === 'SUCCEEDED' && (
             <button
+              id="rollback-deployment-btn"
               onClick={handleRollback}
               disabled={rollingBack}
-              className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-medium transition disabled:opacity-50"
+              className="btn btn-secondary text-xs"
             >
-              {rollingBack ? 'Creating Rollback...' : 'Rollback to this version'}
+              {rollingBack ? (
+                <span className="flex items-center gap-1.5">
+                  <svg className="animate-spin" width="12" height="12" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeOpacity="0.3" />
+                    <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+                  </svg>
+                  Rolling back…
+                </span>
+              ) : '↩ Rollback to This'}
             </button>
           )}
         </div>
       </div>
 
       {error && (
-        <div className="p-3.5 bg-rose-500/10 border border-rose-500/20 text-rose-400 text-sm rounded-lg">
+        <div className="alert alert-error animate-fade-in">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="flex-shrink-0">
+            <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
           {error}
         </div>
       )}
 
-      {/* Real-time Log Viewer Terminal */}
-      <div className="bg-slate-950 border border-slate-800 rounded-xl overflow-hidden shadow-2xl">
-        <div className="bg-slate-900/80 px-4 py-2.5 border-b border-slate-800 flex items-center justify-between text-xs text-slate-400">
-          <div className="flex items-center space-x-2">
-            <div className="w-2.5 h-2.5 rounded-full bg-rose-500" />
-            <div className="w-2.5 h-2.5 rounded-full bg-amber-500" />
-            <div className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
-            <span className="font-mono text-slate-300 ml-2">Build & Deployment Logs</span>
+      {/* ── Terminal Log Viewer ────────────────────────────────── */}
+      <div style={{
+        background: '#080c14',
+        border: '1px solid var(--border)',
+        borderRadius: '16px',
+        overflow: 'hidden',
+        boxShadow: '0 8px 40px rgba(0,0,0,0.6)',
+      }}>
+        {/* Terminal titlebar */}
+        <div
+          className="flex items-center justify-between px-4 py-2.5"
+          style={{ background: 'rgba(255,255,255,0.04)', borderBottom: '1px solid var(--border)' }}
+        >
+          <div className="flex items-center gap-3">
+            <div className="flex gap-1.5">
+              <div style={{ width: 11, height: 11, borderRadius: '50%', background: '#ff5f57' }} />
+              <div style={{ width: 11, height: 11, borderRadius: '50%', background: '#febc2e' }} />
+              <div style={{ width: 11, height: 11, borderRadius: '50%', background: '#28c840' }} />
+            </div>
+            <span className="text-xs font-mono" style={{ color: 'var(--text-muted)' }}>
+              build &amp; deployment logs
+            </span>
           </div>
-          <span className="text-[11px] text-slate-500">{logs.length} lines</span>
+          <div className="flex items-center gap-3">
+            <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+              {logs.length} lines
+            </span>
+            <button
+              onClick={() => setAutoScroll(!autoScroll)}
+              className="text-xs px-2 py-0.5 rounded transition"
+              style={{
+                background: autoScroll ? 'rgba(79,142,247,0.15)' : 'rgba(255,255,255,0.05)',
+                color: autoScroll ? 'var(--accent)' : 'var(--text-muted)',
+                border: `1px solid ${autoScroll ? 'rgba(79,142,247,0.3)' : 'var(--border)'}`,
+              }}
+            >
+              {autoScroll ? '↓ Auto-scroll ON' : '↓ Auto-scroll OFF'}
+            </button>
+          </div>
         </div>
 
+        {/* Log lines */}
         <div
           ref={logContainerRef}
-          className="p-4 h-[480px] overflow-y-auto font-mono text-xs leading-relaxed text-slate-300 space-y-1 select-text"
+          id="log-container"
+          className="p-4 overflow-y-auto select-text"
+          style={{ height: '520px', fontFamily: "'JetBrains Mono', monospace" }}
         >
           {logs.length === 0 ? (
-            <div className="text-slate-600 italic">Waiting for worker process to begin output stream...</div>
+            <div className="flex items-center gap-2 h-full" style={{ color: 'var(--text-muted)', fontSize: 13 }}>
+              <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeOpacity="0.3" />
+                <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+              </svg>
+              Waiting for build worker to start output stream…
+            </div>
           ) : (
-            logs.map((log) => (
-              <div key={log.id} className="flex items-start space-x-3 hover:bg-slate-900/30 px-1 py-0.5 rounded">
-                <span className="text-slate-600 select-none text-[11px] w-20 shrink-0">
-                  {new Date(log.timestamp).toLocaleTimeString()}
-                </span>
-                <span
-                  className={`select-none text-[10px] uppercase font-bold px-1.5 py-0.2 rounded shrink-0 ${
-                    log.level === 'ERROR'
-                      ? 'bg-rose-500/20 text-rose-400'
-                      : log.level === 'WARN'
-                      ? 'bg-amber-500/20 text-amber-400'
-                      : 'bg-slate-800 text-slate-400'
-                  }`}
-                >
-                  {log.stage || 'BUILD'}
-                </span>
-                <span className="break-all whitespace-pre-wrap">{log.message}</span>
-              </div>
-            ))
+            <div className="space-y-0.5">
+              {logs.map((log) => (
+                <LogLine key={log.id} log={log} />
+              ))}
+              {!isTerminalState && (
+                <div className="flex items-center gap-1.5 mt-2 text-xs" style={{ color: 'var(--text-muted)' }}>
+                  <svg className="animate-spin" width="12" height="12" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeOpacity="0.3" />
+                    <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+                  </svg>
+                  streaming…
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>
+
     </div>
   );
 }

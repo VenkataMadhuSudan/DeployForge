@@ -9,7 +9,7 @@ import {
   DeploymentJobData,
   canTransition,
 } from '@deployforge/shared-types';
-import { loadConfig } from '@deployforge/configuration';
+import { loadConfig, getRedisConnectionOptions } from '@deployforge/configuration';
 
 @Injectable()
 export class DeploymentsService {
@@ -18,11 +18,7 @@ export class DeploymentsService {
   constructor() {
     const config = loadConfig();
     this.queue = new Queue('deployments', {
-      connection: {
-        host: config.REDIS_HOST,
-        port: config.REDIS_PORT,
-        password: config.REDIS_PASSWORD || undefined,
-      },
+      connection: getRedisConnectionOptions(config),
       defaultJobOptions: {
         attempts: 3,
         backoff: {

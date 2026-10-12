@@ -17,6 +17,10 @@ export const EnvSchema = z.object({
   REDIS_HOST: z.string().default('localhost'),
   REDIS_PORT: z.coerce.number().default(6379),
   REDIS_PASSWORD: z.string().optional().default(''),
+  REDIS_TLS: z.preprocess(
+    (val) => val === 'true' || val === '1' || val === true,
+    z.boolean().default(false)
+  ),
 
   JWT_SECRET: z.string().min(16, 'JWT_SECRET must be at least 16 characters'),
   JWT_EXPIRES_IN: z.string().default('7d'),
@@ -117,3 +121,28 @@ export function timingSafeCompare(a: string, b: string): boolean {
   }
   return crypto.timingSafeEqual(bufA, bufB);
 }
+
+/**
+ * Build Redis/IORedis connection options from config.
+ * Used by BullMQ Queue, Worker, and health checks.
+ * Supports TLS connections for cloud Redis providers (e.g., Upstash).
+ */
+export function getRedisConnectionOptions(config?: AppConfig): {
+  host: string;
+  port: number;
+  password: string | undefined;
+  tls?: { rejectUnauthorized: boolean };
+  maxRetriesPerRequest: null;
+  enableReadyCheck: boolean;
+} {
+  const cfg = config ?? loadConfig();
+  return {
+    host: cfg.REDIS_HOST,
+    port: cfg.REDIS_PORT,
+    password: cfg.REDIS_PASSWORD || undefined,
+    ...(cfg.REDIS_TLS ? { tls: { rejectUnauthorized: false } } : {}),
+    maxRetriesPerRequest: null,
+    enableReadyCheck: false,
+  };
+}
+

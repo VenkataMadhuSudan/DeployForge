@@ -1,3 +1,4 @@
+/** @type {import('jest').Config} */
 module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
@@ -8,7 +9,7 @@ module.exports = {
         tsconfig: '<rootDir>/tsconfig.base.json',
         isolatedModules: true,
         diagnostics: {
-          ignoreCodes: [151002],
+          ignoreCodes: [151002, 2345],
         },
       },
     ],
@@ -20,4 +21,16 @@ module.exports = {
   moduleNameMapper: {
     '^@deployforge/(.*)$': '<rootDir>/packages/$1/src',
   },
+  collectCoverageFrom: [
+    'packages/*/src/**/*.ts',
+    'apps/*/src/**/*.ts',
+    '!**/*.d.ts',
+    '!**/node_modules/**',
+    '!**/dist/**',
+  ],
+  coverageReporters: ['text', 'lcov'],
+  coverageDirectory: '<rootDir>/coverage',
+  // Clear mocks between tests
+  clearMocks: true,
+  resetMocks: true,
 };

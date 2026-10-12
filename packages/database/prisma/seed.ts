@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { PrismaClient, UserRole, ProjectFramework, HostingProviderType } from '@prisma/client';
 import argon2 from 'argon2';
 
