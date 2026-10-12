@@ -5,6 +5,32 @@ import { prisma, UserRole as PrismaUserRole } from '@deployforge/database';
 import { RegisterSchema, LoginSchema } from '@deployforge/validation';
 import { SafeUser, UserRole } from '@deployforge/shared-types';
 
+async function withDbRetry<T>(operation: () => Promise<T>, retries = 2, delayMs = 1200): Promise<T> {
+  let lastError: any;
+  for (let attempt = 1; attempt <= retries + 1; attempt++) {
+    try {
+      return await operation();
+    } catch (err: any) {
+      lastError = err;
+      const isConnectionError =
+        err?.code === 'P1001' || // Can't reach database server
+        err?.code === 'P1008' || // Operations timed out
+        err?.code === 'P1017' || // Server closed the connection
+        err?.name === 'PrismaClientInitializationError' ||
+        err?.message?.includes("Can't reach database server") ||
+        err?.message?.includes('Connection terminated') ||
+        err?.message?.includes('timeout');
+
+      if (isConnectionError && attempt <= retries) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs * attempt));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
+}
+
 @Injectable()
 export class AuthService {
   constructor(private readonly jwtService: JwtService) {}
@@ -17,9 +43,11 @@ export class AuthService {
 
     const { email, password, name } = parsed.data;
 
-    const existing = await prisma.user.findUnique({
-      where: { email },
-    });
+    const existing = await withDbRetry(() =>
+      prisma.user.findUnique({
+        where: { email },
+      })
+    );
     if (existing) {
       throw new ConflictException('A user with this email address already exists');
     }
@@ -31,14 +59,16 @@ export class AuthService {
       parallelism: 4,
     });
 
-    const user = await prisma.user.create({
-      data: {
-        email,
-        passwordHash,
-        name: name ?? null,
-        role: PrismaUserRole.USER,
-      },
-    });
+    const user = await withDbRetry(() =>
+      prisma.user.create({
+        data: {
+          email,
+          passwordHash,
+          name: name ?? null,
+          role: PrismaUserRole.USER,
+        },
+      })
+    );
 
     const token = await this.generateToken(user.id, user.email, user.name, user.role as unknown as UserRole);
 
@@ -62,9 +92,11 @@ export class AuthService {
 
     const { email, password } = parsed.data;
 
-    const user = await prisma.user.findUnique({
-      where: { email },
-    });
+    const user = await withDbRetry(() =>
+      prisma.user.findUnique({
+        where: { email },
+      })
+    );
 
     if (!user) {
       // Use generic error message to prevent account enumeration
@@ -91,9 +123,11 @@ export class AuthService {
   }
 
   async getProfile(userId: string): Promise<SafeUser> {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-    });
+    const user = await withDbRetry(() =>
+      prisma.user.findUnique({
+        where: { id: userId },
+      })
+    );
     if (!user) {
       throw new UnauthorizedException('User not found');
     }

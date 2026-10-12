@@ -13,7 +13,7 @@ export class AuthController {
   async register(@Body() body: unknown, @Res({ passthrough: true }) res: Response) {
     const result = await this.authService.register(body);
     this.setAuthCookie(res, result.token);
-    return result;
+    return { ...result, access_token: result.token };
   }
 
   @Post('login')
@@ -21,7 +21,7 @@ export class AuthController {
   async login(@Body() body: unknown, @Res({ passthrough: true }) res: Response) {
     const result = await this.authService.login(body);
     this.setAuthCookie(res, result.token);
-    return result;
+    return { ...result, access_token: result.token };
   }
 
   @Post('logout')

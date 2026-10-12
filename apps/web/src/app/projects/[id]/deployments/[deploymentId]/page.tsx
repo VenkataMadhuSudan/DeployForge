@@ -67,6 +67,7 @@ export default function DeploymentLogsPage({
   const [autoScroll, setAutoScroll] = useState(true);
   const lastSeqRef = useRef<number>(0);
   const logContainerRef = useRef<HTMLDivElement>(null);
+  const isFetchingLogsRef = useRef<boolean>(false);
 
   const isTerminalState =
     deployment?.status === DeploymentStatus.SUCCEEDED ||
@@ -103,18 +104,26 @@ export default function DeploymentLogsPage({
   };
 
   const fetchLogs = async () => {
+    if (isFetchingLogsRef.current) return;
+    isFetchingLogsRef.current = true;
     try {
       const data = await apiRequest<{ logs: SafeDeploymentLog[]; nextSequence: number | null }>(
         `/projects/${resolvedParams.id}/deployments/${resolvedParams.deploymentId}/logs?after=${lastSeqRef.current}&limit=500`
       );
-      if (data.logs.length > 0) {
-        setLogs((prev) => [...prev, ...data.logs]);
-        if (data.nextSequence) {
-          lastSeqRef.current = data.nextSequence;
-        }
+      if (data?.logs && data.logs.length > 0) {
+        setLogs((prev) => {
+          const seenIds = new Set(prev.map((l) => l.id));
+          const newEntries = data.logs.filter((l) => !seenIds.has(l.id));
+          if (newEntries.length === 0) return prev;
+          return [...prev, ...newEntries];
+        });
+        const maxSeq = Math.max(...data.logs.map((l) => l.sequenceNumber), lastSeqRef.current);
+        lastSeqRef.current = maxSeq;
       }
     } catch {
       // ignore polling errors
+    } finally {
+      isFetchingLogsRef.current = false;
     }
   };
 
@@ -322,7 +331,7 @@ export default function DeploymentLogsPage({
           ) : (
             <div className="space-y-0.5">
               {logs.map((log) => (
-                <LogLine key={log.id} log={log} />
+                <LogLine key={`${log.id}-${log.sequenceNumber}`} log={log} />
               ))}
               {!isTerminalState && (
                 <div className="flex items-center gap-1.5 mt-2 text-xs" style={{ color: 'var(--text-muted)' }}>

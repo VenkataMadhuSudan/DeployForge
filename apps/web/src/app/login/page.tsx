@@ -18,12 +18,13 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      const data = await apiRequest<{ access_token: string }>('/auth/login', {
+      const data = await apiRequest<{ access_token?: string; token?: string }>('/auth/login', {
         method: 'POST',
         body: JSON.stringify({ email, password }),
       });
-      if (data.access_token) {
-        localStorage.setItem('deployforge_token', data.access_token);
+      const authToken = data.access_token || data.token;
+      if (authToken) {
+        localStorage.setItem('deployforge_token', authToken);
       }
       router.push('/dashboard');
     } catch (err: any) {

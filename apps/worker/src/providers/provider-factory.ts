@@ -1,12 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import http from 'node:http';
 import {
   HostingProviderAdapter,
   HostingProviderType,
   DeploymentResult,
 } from '@deployforge/shared-types';
 import { loadConfig } from '@deployforge/configuration';
+
+let localStaticServer: http.Server | null = null;
 
 export class LocalTestingProvider implements HostingProviderAdapter {
   readonly providerName = HostingProviderType.LOCAL_TESTING;
@@ -18,6 +21,76 @@ export class LocalTestingProvider implements HostingProviderAdapter {
     this.storageBaseDir = path.resolve('./storage/deployments');
     this.port = config.LOCAL_DEPLOYMENT_PORT || 8080;
     fs.mkdirSync(this.storageBaseDir, { recursive: true });
+    this.startStaticServer();
+  }
+
+  private startStaticServer(): void {
+    if (localStaticServer) return;
+
+    localStaticServer = http.createServer((req, res) => {
+      try {
+        const reqUrl = new URL(req.url || '/', `http://localhost:${this.port}`);
+        let relativePath = decodeURIComponent(reqUrl.pathname);
+
+        if (relativePath.startsWith('/deployments/')) {
+          relativePath = relativePath.slice('/deployments/'.length);
+        } else if (relativePath.startsWith('/deployments')) {
+          relativePath = relativePath.slice('/deployments'.length);
+        }
+
+        const safePath = path.normalize(path.join(this.storageBaseDir, relativePath));
+        if (!safePath.startsWith(this.storageBaseDir)) {
+          res.writeHead(403, { 'Content-Type': 'text/plain' });
+          res.end('Access Denied');
+          return;
+        }
+
+        let filePath = safePath;
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
+          filePath = path.join(filePath, 'index.html');
+        }
+
+        if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+          res.writeHead(404, { 'Content-Type': 'text/html' });
+          res.end('<h1>404 Not Found</h1><p>Deployment artifact not found.</p>');
+          return;
+        }
+
+        const ext = path.extname(filePath).toLowerCase();
+        const mimeTypes: Record<string, string> = {
+          '.html': 'text/html; charset=utf-8',
+          '.css': 'text/css; charset=utf-8',
+          '.js': 'application/javascript; charset=utf-8',
+          '.json': 'application/json; charset=utf-8',
+          '.png': 'image/png',
+          '.jpg': 'image/jpeg',
+          '.jpeg': 'image/jpeg',
+          '.gif': 'image/gif',
+          '.svg': 'image/svg+xml',
+          '.ico': 'image/x-icon',
+          '.woff': 'font/woff',
+          '.woff2': 'font/woff2',
+          '.ttf': 'font/ttf',
+        };
+
+        const contentType = mimeTypes[ext] || 'application/octet-stream';
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Access-Control-Allow-Origin': '*',
+        });
+        fs.createReadStream(filePath).pipe(res);
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Internal Server Error');
+      }
+    });
+
+    localStaticServer.on('error', () => {
+      // Ignore if port is already in use
+    });
+
+    localStaticServer.listen(this.port);
+    localStaticServer.unref();
   }
 
   async deploy(input: {
