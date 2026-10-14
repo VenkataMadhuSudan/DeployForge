@@ -127,9 +127,23 @@ export class DeploymentWorkerService {
 
       // 5. Framework and build detection
       const detected = detectFramework(workspacePath);
-      const effectiveInstall = data.installCommand || detected.installCommand;
-      const effectiveBuild = data.buildCommand || detected.buildCommand;
+      let effectiveInstall = data.installCommand || detected.installCommand;
+      let effectiveBuild = data.buildCommand || detected.buildCommand;
       const effectiveOutput = data.outputDirectory || detected.outputDirectory;
+
+      // Prevent sandbox escapes or infinite dev server loops when workspace has no package.json
+      if (!fs.existsSync(path.join(workspacePath, 'package.json'))) {
+        if (effectiveBuild && effectiveBuild.toLowerCase().includes('npm')) {
+          await appendLog(LogLevel.WARN, BuildStage.PREPARE, `Skipped '${effectiveBuild}': no package.json in workspace`);
+          effectiveBuild = 'echo "Static build ready"';
+        }
+        if (effectiveInstall && effectiveInstall.toLowerCase().includes('npm')) {
+          effectiveInstall = 'echo "No dependencies to install"';
+        }
+      } else if (effectiveBuild && (effectiveBuild.includes('run dev') || effectiveBuild.trim() === 'npm start')) {
+        await appendLog(LogLevel.WARN, BuildStage.PREPARE, `Replacing '${effectiveBuild}' with 'npm run build' (dev servers do not terminate)`);
+        effectiveBuild = 'npm run build';
+      }
 
       await appendLog(
         LogLevel.INFO,
