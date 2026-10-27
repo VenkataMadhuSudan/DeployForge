@@ -18,8 +18,9 @@
     "db:seed": "pnpm --filter @deployforge/database seed"
   },
   "devDependencies": {
+    "@types/jest": "^29.5.14",
     "@types/node": "^22.13.0",
-    "typescript": "^5.7.3",
-    "rimraf": "^6.0.1"
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.3"
   }
 }

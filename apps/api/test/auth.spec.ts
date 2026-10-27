@@ -62,7 +62,7 @@ const prisma = dbPrisma as unknown as {
 
 // ─── Test app factory ─────────────────────────────────────────────────────────
 async function createApp(): Promise<INestApplication> {
-  process.env.NODE_ENV = 'test';
+  (process.env as Record<string, string | undefined>).NODE_ENV = 'test';
   process.env.DATABASE_URL = 'postgresql://mock:mock@localhost:5432/mock';
   process.env.JWT_SECRET = 'test-jwt-secret-that-is-long-enough';
   process.env.SESSION_SECRET = 'test-session-secret-long-enough-xxx';
