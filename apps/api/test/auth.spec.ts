@@ -1,3 +1,5 @@
+/// <reference types="jest" />
+/// <reference types="node" />
 /**
  * Integration tests for @deployforge/api — Auth & Health endpoints.
  *
@@ -12,6 +14,7 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import * as argon2 from 'argon2';
 import { AppModule } from '../src/app.module';
+import { prisma as dbPrisma } from '@deployforge/database';
 
 // ─── Mock @deployforge/database prisma client ────────────────────────────────
 const mockUser = {
@@ -48,7 +51,14 @@ jest.mock('bullmq', () => ({
   })),
 }));
 
-const { prisma } = require('@deployforge/database');
+const prisma = dbPrisma as unknown as {
+  user: {
+    findUnique: jest.Mock;
+    create: jest.Mock;
+  };
+  $queryRaw: jest.Mock;
+  $disconnect: jest.Mock;
+};
 
 // ─── Test app factory ─────────────────────────────────────────────────────────
 async function createApp(): Promise<INestApplication> {

@@ -1,3 +1,5 @@
+/// <reference types="jest" />
+/// <reference types="node" />
 /**
  * Unit tests for the framework detector.
  * Uses tmp directories with synthetic package.json files

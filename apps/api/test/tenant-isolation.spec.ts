@@ -1,9 +1,12 @@
+/// <reference types="jest" />
+/// <reference types="node" />
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, ForbiddenException } from '@nestjs/common';
 import { ProjectOwnershipGuard } from '../src/common/guards/project-ownership.guard';
 import { ProjectsService } from '../src/modules/projects/projects.service';
 import { EnvVarsService } from '../src/modules/env-vars/env-vars.service';
 import { UserRole } from '@deployforge/shared-types';
+import { prisma } from '@deployforge/database';
 
 describe('Security & Multi-Tenant Isolation', () => {
   let guard: ProjectOwnershipGuard;
@@ -33,8 +36,8 @@ describe('Security & Multi-Tenant Isolation', () => {
     } as any;
 
     // Spy on prisma
-    const prismaSpy = jest.spyOn(require('@deployforge/database').prisma.project, 'findUnique');
-    prismaSpy.mockResolvedValue(mockProject);
+    const prismaSpy = jest.spyOn(prisma.project, 'findUnique');
+    prismaSpy.mockResolvedValue(mockProject as any);
 
     await expect(guard.canActivate(mockContext)).rejects.toThrow(ForbiddenException);
 

@@ -1,3 +1,5 @@
+/// <reference types="jest" />
+/// <reference types="node" />
 import { diagnoseDeploymentError } from '../src/orchestrator/error-diagnostics';
 import { BuildStage } from '@deployforge/shared-types';
 
