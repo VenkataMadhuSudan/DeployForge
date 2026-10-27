@@ -35,7 +35,7 @@ DeployForge is a developer platform that automatically builds, tests, and deploy
 
 ## Architecture Overview
 
-DeployForge enforces strict separation between the **Control Plane** (REST API, Web Frontend, Database, Outbox Queue Dispatcher) and the **Build Plane** (Sandboxed Non-Root Container Execution, Isolated Worker, Artifact Delivery):
+DeployForge enforces strict separation between the **Control Plane** (REST API, Web Frontend, Database, Outbox Queue Dispatcher) and the **Build Plane** (Sandboxed Non-Root Container Execution, Isolated Worker, Artifact Delivery):`
 
 ```
 +-----------------------------------------------------------------------------------+
