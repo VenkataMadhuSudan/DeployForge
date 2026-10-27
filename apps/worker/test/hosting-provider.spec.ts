@@ -47,7 +47,6 @@ describe('LocalTestingProvider & Static Server', () => {
     } catch {
       // ignore cleanup error
     }
-    await stopLocalStaticServer();
   });
 
   it('serves actual index.html on direct path request', async () => {
@@ -99,6 +98,44 @@ describe('LocalTestingProvider & Static Server', () => {
   it('blocks path traversal and returns 403/404', async () => {
     const res = await fetch(`http://localhost:${testPort}/deployments/${testDeploymentId}/../../.env`);
     expect([403, 404]).toContain(res.status);
+  });
+
+  it('serves deployment via RFC 6761 subdomain routing (Host: <deploymentId>.localhost)', async () => {
+    const res = await fetch(`http://localhost:${testPort}/`, {
+      headers: {
+        'X-Forwarded-Host': `${testDeploymentId}.localhost:${testPort}`,
+        Host: `${testDeploymentId}.localhost:${testPort}`,
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    const text = await res.text();
+    expect(text).toContain('Welcome to Real Site');
+  });
+
+  it('serves assets on subdomain without requiring Referer or cookies', async () => {
+    const res = await fetch(`http://localhost:${testPort}/assets/index.js`, {
+      headers: {
+        'X-Forwarded-Host': `${testDeploymentId}.localhost:${testPort}`,
+        Host: `${testDeploymentId}.localhost:${testPort}`,
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('javascript');
+    const text = await res.text();
+    expect(text).toBe('console.log("App script running");');
+  });
+
+  it('serves extended MIME types (.wasm, .json) correctly', async () => {
+    fs.writeFileSync(path.join(deploymentDir, 'assets', 'module.wasm'), Buffer.from([0x00, 0x61, 0x73, 0x6d]));
+    const res = await fetch(`http://localhost:${testPort}/assets/module.wasm`, {
+      headers: {
+        'X-Forwarded-Host': `${testDeploymentId}.localhost:${testPort}`,
+        Host: `${testDeploymentId}.localhost:${testPort}`,
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('application/wasm');
   });
 
   it('verifies deployment health check via getStatus()', async () => {

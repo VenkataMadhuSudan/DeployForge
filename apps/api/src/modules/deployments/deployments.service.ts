@@ -97,6 +97,8 @@ export class DeploymentsService implements OnModuleDestroy {
     const jobData: DeploymentJobData = {
       deploymentId: deployment.id,
       projectId: project.id,
+      projectSlug: project.slug,
+      rootDirectory: project.rootDirectory,
       commitSha: deployment.commitSha,
       branch: deployment.branch,
       triggerType,

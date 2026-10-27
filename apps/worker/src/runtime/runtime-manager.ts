@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { spawn, ChildProcess } from 'node:child_process';
 import { AppLogger, SecretRedactor, sanitizeLogContent } from '@deployforge/logging';
 import { LogLevel, BuildStage } from '@deployforge/shared-types';
+import { killProcessTree } from '../utils/process-tree';
 
 export interface RuntimeInstance {
   deploymentId: string;
@@ -254,27 +255,23 @@ export class RuntimeProcessManager {
 
     try {
       if (instance.process && !instance.process.killed && instance.process.pid) {
-        if (process.platform === 'win32') {
-          await new Promise<void>((resolve) => {
-            const tk = spawn('taskkill', ['/pid', String(instance.process.pid), '/T', '/F'], {
-              windowsHide: true,
-            });
-            tk.on('close', () => resolve());
-            tk.on('error', () => resolve());
-            setTimeout(resolve, 2500);
-          });
-          // Small grace period for Windows to release file handles
-          await new Promise((r) => setTimeout(r, 200));
-        } else {
-          instance.process.kill('SIGTERM');
-          await new Promise((r) => setTimeout(r, 300));
-        }
+        await killProcessTree(instance.process.pid);
+        await new Promise((r) => setTimeout(r, 150));
       }
     } catch (e: any) {
       this.logger.warn(`Error terminating runtime ${deploymentId}: ${e.message}`);
     } finally {
       instance.status = 'STOPPED';
       this.runtimes.delete(deploymentId);
+    }
+  }
+
+  async stopProjectRuntimesExcept(projectId: string, keepDeploymentId: string): Promise<void> {
+    for (const [depId, instance] of this.runtimes.entries()) {
+      if (instance.projectId === projectId && depId !== keepDeploymentId) {
+        this.logger.info(`Stopping older runtime ${depId} for project ${projectId}`);
+        await this.stopRuntime(depId);
+      }
     }
   }
 

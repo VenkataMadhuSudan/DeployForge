@@ -10,9 +10,43 @@ import {
   LogLevel,
   BuildStage,
 } from '@deployforge/shared-types';
+import { prisma } from '@deployforge/database';
 import { loadConfig } from '@deployforge/configuration';
 import { SecretRedactor } from '@deployforge/logging';
 import { RuntimeProcessManager } from '../runtime/runtime-manager';
+
+const slugCache = new Map<string, { deploymentId: string; expiresAt: number }>();
+
+export async function resolveIdentifierToDeploymentId(identifier: string, storageBaseDir: string): Promise<string> {
+  if (fs.existsSync(path.join(storageBaseDir, identifier)) || RuntimeProcessManager.getInstance().hasRuntime(identifier)) {
+    return identifier;
+  }
+
+  const cached = slugCache.get(identifier);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.deploymentId;
+  }
+
+  try {
+    const project = await prisma.project.findFirst({
+      where: {
+        OR: [{ slug: identifier }, { id: identifier }],
+      },
+      select: { activeDeploymentId: true },
+    });
+    if (project?.activeDeploymentId) {
+      slugCache.set(identifier, {
+        deploymentId: project.activeDeploymentId,
+        expiresAt: Date.now() + 10000,
+      });
+      return project.activeDeploymentId;
+    }
+  } catch {
+    // Non-fatal DB lookup fallback
+  }
+
+  return identifier;
+}
 
 export function safeDeleteDirectory(targetPath: string): boolean {
   if (!fs.existsSync(targetPath)) return true;
@@ -167,27 +201,46 @@ export function repairRuntimeJunctions(runtimeDir: string, oldWorkspacePath?: st
 }
 
 let localStaticServer: http.Server | null = null;
+let currentServerPort: number = 0;
 
 export class LocalTestingProvider implements HostingProviderAdapter {
   readonly providerName = HostingProviderType.LOCAL_TESTING;
   private storageBaseDir: string;
   private port: number;
 
-  constructor() {
+  constructor(port?: number) {
     const config = loadConfig();
     const defaultStorage = fs.existsSync(path.resolve('./apps/worker/storage'))
       ? path.resolve('./apps/worker/storage/deployments')
       : path.resolve('./storage/deployments');
     this.storageBaseDir = defaultStorage;
-    this.port = config.LOCAL_DEPLOYMENT_PORT || 8080;
+    this.port =
+      port ||
+      (process.env.LOCAL_DEPLOYMENT_PORT ? parseInt(process.env.LOCAL_DEPLOYMENT_PORT, 10) : (config.LOCAL_DEPLOYMENT_PORT || 8080));
     fs.mkdirSync(this.storageBaseDir, { recursive: true });
     this.startStaticServer();
   }
 
-  private startStaticServer(): void {
-    if (localStaticServer) return;
+  public getPort(): number {
+    return this.port;
+  }
 
-    localStaticServer = http.createServer((req, res) => {
+  private startStaticServer(): void {
+    if (localStaticServer && currentServerPort === this.port) return;
+
+    if (localStaticServer && currentServerPort !== this.port) {
+      try {
+        localStaticServer.close();
+      } catch {
+        // ignore
+      }
+      localStaticServer = null;
+      currentServerPort = 0;
+    }
+
+    currentServerPort = this.port;
+
+    localStaticServer = http.createServer(async (req, res) => {
       try {
         const reqUrl = new URL(req.url || '/', `http://localhost:${this.port}`);
         let pathname = '/';
@@ -197,52 +250,67 @@ export class LocalTestingProvider implements HostingProviderAdapter {
           pathname = reqUrl.pathname;
         }
 
-        // 1. Determine target deploymentId
-        let deploymentId: string | null = null;
-        let relativeFilePath: string = '';
+        // 1. Determine target raw identifier (deploymentId or projectSlug)
+        let rawIdentifier: string | null = null;
+        let relativeFilePath = '';
 
-        // Check subdomain routing: <deploymentId>.localhost:<port>
-        const hostHeader = req.headers.host || '';
+        // Check subdomain routing: <subdomain>.localhost:<port>
+        const hostHeader =
+          (req.headers['x-forwarded-host'] as string) ||
+          (req.headers['x-host'] as string) ||
+          req.headers.host ||
+          '';
         const hostMatch = hostHeader.match(/^([a-zA-Z0-9_-]+)\.localhost(?::\d+)?$/i);
 
         if (hostMatch) {
-          deploymentId = hostMatch[1];
+          rawIdentifier = hostMatch[1];
           relativeFilePath = pathname.replace(/^\/+/, '');
         } else if (pathname.startsWith('/deployments/')) {
           const afterPrefix = pathname.slice('/deployments/'.length);
           const firstSlash = afterPrefix.indexOf('/');
           if (firstSlash === -1) {
-            deploymentId = afterPrefix;
+            rawIdentifier = afterPrefix;
             relativeFilePath = '';
           } else {
-            deploymentId = afterPrefix.substring(0, firstSlash);
+            rawIdentifier = afterPrefix.substring(0, firstSlash);
             relativeFilePath = afterPrefix.substring(firstSlash + 1);
           }
         } else {
           // Root-relative asset requested (e.g. /assets/index.js, /favicon.ico, /_next/...)
-          // Resolve using Referer header first (per tab isolation), then df_deployment_id cookie
+          // Resolve using Referer header first (subdomain or path isolation), then df_deployment_id cookie
           if (req.headers.referer) {
-            const refererMatch = req.headers.referer.match(/\/deployments\/([a-zA-Z0-9_-]+)/);
-            if (refererMatch) {
-              deploymentId = refererMatch[1];
+            const refererSubMatch = req.headers.referer.match(/:\/\/([a-zA-Z0-9_-]+)\.localhost/i);
+            if (refererSubMatch) {
+              rawIdentifier = refererSubMatch[1];
+            } else {
+              const refererPathMatch = req.headers.referer.match(/\/deployments\/([a-zA-Z0-9_-]+)/);
+              if (refererPathMatch) {
+                rawIdentifier = refererPathMatch[1];
+              }
             }
           }
-          if (!deploymentId) {
+          if (!rawIdentifier) {
             const cookieHeader = req.headers.cookie || '';
             const cookieMatch = cookieHeader.match(/df_deployment_id=([a-zA-Z0-9_-]+)/);
             if (cookieMatch) {
-              deploymentId = cookieMatch[1];
+              rawIdentifier = cookieMatch[1];
             }
           }
           relativeFilePath = pathname.replace(/^\/+/, '');
         }
 
-        // Validate deploymentId format (prevent path traversal via deploymentId)
-        if (!deploymentId || !/^[a-zA-Z0-9_-]+$/.test(deploymentId)) {
+        if (!rawIdentifier && reqUrl.searchParams.has('df_deployment_id')) {
+          rawIdentifier = reqUrl.searchParams.get('df_deployment_id');
+        }
+
+        // Validate rawIdentifier format (prevent path traversal)
+        if (!rawIdentifier || !/^[a-zA-Z0-9_-]+$/.test(rawIdentifier)) {
           res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end('<h1>404 Not Found</h1><p>No deployment context specified.</p>');
           return;
         }
+
+        const deploymentId = await resolveIdentifierToDeploymentId(rawIdentifier, this.storageBaseDir);
 
         // 2. Check if an active SSR runtime exists for this deployment
         const runtimeManager = RuntimeProcessManager.getInstance();
@@ -330,6 +398,12 @@ export class LocalTestingProvider implements HostingProviderAdapter {
             '.otf': 'font/otf',
             '.txt': 'text/plain; charset=utf-8',
             '.map': 'application/json; charset=utf-8',
+            '.wasm': 'application/wasm',
+            '.avif': 'image/avif',
+            '.webmanifest': 'application/manifest+json',
+            '.xml': 'application/xml',
+            '.mp4': 'video/mp4',
+            '.pdf': 'application/pdf',
           };
 
           res.writeHead(200, {
@@ -433,7 +507,7 @@ export class LocalTestingProvider implements HostingProviderAdapter {
         onLog: input.onLog || (async () => {}),
       });
 
-      const deploymentUrl = `http://localhost:${this.port}/deployments/${input.deploymentId}/`;
+      const deploymentUrl = `http://${input.deploymentId}.localhost:${this.port}/`;
 
       return {
         providerDeploymentId: `local-${input.deploymentId}`,
@@ -472,21 +546,7 @@ export class LocalTestingProvider implements HostingProviderAdapter {
       throw new Error(`Deployed artifacts in ${targetDir} do not contain an index.html entry point`);
     }
 
-    // Inject base tag for robust relative asset resolution if head is present and base is missing
-    try {
-      const htmlContent = fs.readFileSync(indexPath, 'utf8');
-      if (!/<base\s/i.test(htmlContent) && /<head>/i.test(htmlContent)) {
-        const patched = htmlContent.replace(
-          /<head>/i,
-          `<head>\n  <base href="/deployments/${input.deploymentId}/">`
-        );
-        fs.writeFileSync(indexPath, patched, 'utf8');
-      }
-    } catch {
-      // Non-fatal if base tag injection fails
-    }
-
-    const deploymentUrl = `http://localhost:${this.port}/deployments/${input.deploymentId}/index.html`;
+    const deploymentUrl = `http://${input.deploymentId}.localhost:${this.port}/`;
 
     return {
       providerDeploymentId: `local-${input.deploymentId}`,
@@ -508,14 +568,15 @@ export class LocalTestingProvider implements HostingProviderAdapter {
       if (runtime.status === 'FAILED' || runtime.status === 'STOPPED') {
         return { status: 'ERROR', message: `SSR runtime process status is ${runtime.status}` };
       }
-      const deploymentUrl = `http://localhost:${this.port}/deployments/${deploymentId}/`;
+      const internalCheckUrl = `http://127.0.0.1:${this.port}/deployments/${deploymentId}/`;
+      const publicUrl = `http://${deploymentId}.localhost:${this.port}/`;
       try {
-        const res = await fetch(deploymentUrl, {
+        const res = await fetch(internalCheckUrl, {
           method: 'GET',
           headers: { 'User-Agent': 'DeployForge-HealthCheck/1.0' },
         });
         if (res.status >= 200 && res.status < 500) {
-          return { status: 'READY', url: deploymentUrl };
+          return { status: 'READY', url: publicUrl };
         }
         return { status: 'ERROR', message: `SSR runtime health check returned HTTP ${res.status}` };
       } catch (err: any) {
@@ -530,11 +591,12 @@ export class LocalTestingProvider implements HostingProviderAdapter {
       return { status: 'ERROR', message: `Entry point 'index.html' not found in ${dir}` };
     }
 
-    const deploymentUrl = `http://localhost:${this.port}/deployments/${deploymentId}/index.html`;
+    const internalCheckUrl = `http://127.0.0.1:${this.port}/deployments/${deploymentId}/index.html`;
+    const publicUrl = `http://${deploymentId}.localhost:${this.port}/`;
 
     // Perform actual HTTP verification
     try {
-      const res = await fetch(deploymentUrl, {
+      const res = await fetch(internalCheckUrl, {
         method: 'GET',
         headers: { 'User-Agent': 'DeployForge-HealthCheck/1.0' },
       });
@@ -555,7 +617,7 @@ export class LocalTestingProvider implements HostingProviderAdapter {
 
       return {
         status: 'READY',
-        url: deploymentUrl,
+        url: publicUrl,
       };
     } catch (fetchErr: any) {
       return { status: 'ERROR', message: `Health check connection error: ${fetchErr.message}` };

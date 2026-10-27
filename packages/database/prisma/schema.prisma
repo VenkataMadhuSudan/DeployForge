@@ -151,6 +151,8 @@ model Project {
   buildCommand       String?
   installCommand     String?
   outputDirectory    String              @default("dist")
+  rootDirectory      String?
+  activeDeploymentId String?
   deploymentProvider HostingProviderType @default(LOCAL_TESTING)
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt

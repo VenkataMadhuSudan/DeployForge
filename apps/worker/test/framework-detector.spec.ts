@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { detectFramework } from '../src/frameworks/framework-detector';
+import { detectFramework, resolveProjectRoot } from '../src/frameworks/framework-detector';
 import { ProjectFramework } from '@deployforge/shared-types';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -196,4 +196,52 @@ describe('detectFramework() — error resilience', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+// ─── resolveProjectRoot() ───────────────────────────────────────────────────
+describe('resolveProjectRoot() — Monorepos & Configured Roots', () => {
+  it('resolves configured valid root directory', () => {
+    const dir = makeTmpDir();
+    fs.mkdirSync(path.join(dir, 'apps', 'web'), { recursive: true });
+    writeJson(path.join(dir, 'apps', 'web'), 'package.json', { dependencies: { next: '14.0.0' } });
+
+    const result = resolveProjectRoot(dir, 'apps/web');
+    expect(result.rootPath).toBe(path.resolve(dir, 'apps/web'));
+    expect(result.relativeRoot).toBe('apps/web');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('rejects path traversal in configured root directory', () => {
+    const dir = makeTmpDir();
+    expect(() => {
+      resolveProjectRoot(dir, '../../etc');
+    }).toThrow(/traverses outside workspace/i);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('rejects nonexistent configured root directory', () => {
+    const dir = makeTmpDir();
+    expect(() => {
+      resolveProjectRoot(dir, 'nonexistent/folder');
+    }).toThrow(/does not exist in repository/i);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('auto-detects apps/web in a monorepo workspace when root has no web app', () => {
+    const dir = makeTmpDir();
+    writeJson(dir, 'package.json', { name: 'my-monorepo', workspaces: ['apps/*'] });
+    fs.mkdirSync(path.join(dir, 'apps', 'web'), { recursive: true });
+    writeJson(path.join(dir, 'apps', 'web'), 'package.json', {
+      name: 'web-app',
+      dependencies: { vite: '5.0.0' },
+      scripts: { build: 'vite build' },
+    });
+
+    const result = resolveProjectRoot(dir, null);
+    expect(result.isMonorepo).toBe(true);
+    expect(result.relativeRoot).toBe('apps/web');
+    expect(result.warnings.length).toBeGreaterThan(0);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 

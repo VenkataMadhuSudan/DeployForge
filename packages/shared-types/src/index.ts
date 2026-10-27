@@ -87,6 +87,8 @@ export enum ProjectRole {
 export interface DeploymentJobData {
   deploymentId: string;
   projectId: string;
+  projectSlug?: string;
+  rootDirectory?: string | null;
   commitSha: string;
   branch: string;
   triggerType: TriggerType;
@@ -145,6 +147,8 @@ export interface SafeProject {
   repoOwner: string;
   repoName: string;
   defaultBranch: string;
+  rootDirectory?: string | null;
+  activeDeploymentId?: string | null;
   framework: ProjectFramework;
   buildCommand: string | null;
   installCommand: string | null;

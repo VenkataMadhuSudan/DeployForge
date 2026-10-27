@@ -5,9 +5,11 @@ import Docker from 'dockerode';
 import { LogLevel, BuildStage } from '@deployforge/shared-types';
 import { SecretRedactor, sanitizeLogContent } from '@deployforge/logging';
 import { loadConfig } from '@deployforge/configuration';
+import { killProcessTree } from '../utils/process-tree';
 
 export interface BuildExecutionInput {
   workspacePath: string;
+  installCwd?: string;
   installCommand?: string | null;
   buildCommand?: string | null;
   outputDirectory: string;
@@ -41,10 +43,11 @@ export class ProcessBuildExecutor implements BuildExecutor {
 
     // 1. Install Dependencies Stage
     if (input.installCommand && input.installCommand.trim() !== '') {
-      await input.onLog(LogLevel.INFO, BuildStage.INSTALL, `Executing install command: ${input.installCommand}`);
+      const installCwd = input.installCwd || input.workspacePath;
+      await input.onLog(LogLevel.INFO, BuildStage.INSTALL, `Executing install command: ${input.installCommand} (cwd: ${installCwd})`);
       const installRes = await this.runCommand(
         input.installCommand,
-        input.workspacePath,
+        installCwd,
         input.envVars,
         BuildStage.INSTALL,
         input,
@@ -218,9 +221,13 @@ export class ProcessBuildExecutor implements BuildExecutor {
       });
 
       let timedOut = false;
-      const timer = setTimeout(() => {
+      const timer = setTimeout(async () => {
         timedOut = true;
-        child.kill('SIGKILL');
+        if (child.pid) {
+          await killProcessTree(child.pid);
+        } else {
+          child.kill('SIGKILL');
+        }
         input.onLog(LogLevel.ERROR, stage, `Execution exceeded timeout limit of ${timeoutMs / 1000} seconds`);
       }, timeoutMs);
 

@@ -25,6 +25,7 @@ export const CreateProjectSchema = z.object({
   repoOwner: z.string().min(1).trim(),
   repoName: z.string().min(1).trim(),
   defaultBranch: z.string().min(1).default('main'),
+  rootDirectory: z.string().max(256).optional().nullable(),
   framework: z.nativeEnum(ProjectFramework).default(ProjectFramework.STATIC),
   buildCommand: z.string().max(256).optional().nullable(),
   installCommand: z.string().max(256).optional().nullable(),

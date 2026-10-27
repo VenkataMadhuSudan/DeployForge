@@ -13,10 +13,11 @@ import {
 import { SecretRedactor, AppLogger, sanitizeLogContent } from '@deployforge/logging';
 import { loadConfig, decryptSecret, getRedisConnectionOptions } from '@deployforge/configuration';
 import { createBuildExecutor } from '../executors/build-executor';
-import { detectFramework, DeploymentMode } from '../frameworks/framework-detector';
+import { detectFramework, resolveProjectRoot, DeploymentMode } from '../frameworks/framework-detector';
 import { createHostingProvider, safeDeleteDirectory } from '../providers/provider-factory';
 import { diagnoseDeploymentError } from './error-diagnostics';
 import { RuntimeProcessManager } from '../runtime/runtime-manager';
+import { killProcessTree } from '../utils/process-tree';
 
 export class DeploymentWorkerService {
   private worker!: Worker;
@@ -135,8 +136,21 @@ export class DeploymentWorkerService {
       await this.cloneRepository(workspacePath, data, redactor, appendLog);
       await appendLog(LogLevel.INFO, BuildStage.PREPARE, 'Repository clone completed successfully.');
 
-      // 5. Framework and build detection
-      const detected = detectFramework(workspacePath);
+      // 5. Framework and project root resolution
+      const resolvedRoot = resolveProjectRoot(workspacePath, data.rootDirectory);
+      for (const warning of resolvedRoot.warnings) {
+        await appendLog(LogLevel.WARN, BuildStage.PREPARE, warning);
+      }
+      const projectRootPath = resolvedRoot.rootPath;
+      if (resolvedRoot.relativeRoot) {
+        await appendLog(
+          LogLevel.INFO,
+          BuildStage.PREPARE,
+          `Application project root: '${resolvedRoot.relativeRoot}'`
+        );
+      }
+
+      const detected = detectFramework(projectRootPath);
       isRuntime = detected.deploymentMode === DeploymentMode.SSR_RUNTIME;
 
       if (isRuntime) {
@@ -154,10 +168,14 @@ export class DeploymentWorkerService {
       }
 
       // Check for Prisma schema and ensure build-time database connectivity configuration
-      if (fs.existsSync(path.join(workspacePath, 'prisma', 'schema.prisma'))) {
+      const prismaPath = fs.existsSync(path.join(projectRootPath, 'prisma', 'schema.prisma'))
+        ? path.join(projectRootPath, 'prisma', 'schema.prisma')
+        : (fs.existsSync(path.join(workspacePath, 'prisma', 'schema.prisma')) ? path.join(workspacePath, 'prisma', 'schema.prisma') : null);
+
+      if (prismaPath) {
         if (!runtimeEnv['DATABASE_URL']) {
           try {
-            const schemaContent = fs.readFileSync(path.join(workspacePath, 'prisma', 'schema.prisma'), 'utf8');
+            const schemaContent = fs.readFileSync(prismaPath, 'utf8');
             if (schemaContent.includes('provider = "postgresql"')) {
               runtimeEnv['DATABASE_URL'] = 'postgresql://postgres:postgres@localhost:5432/event_manager?schema=public';
             } else if (schemaContent.includes('provider = "mysql"')) {
@@ -212,7 +230,8 @@ export class DeploymentWorkerService {
       await appendLog(LogLevel.INFO, BuildStage.BUILD, `Using build executor: ${executor.executorType}`);
 
       const buildResult = await executor.executeBuild({
-        workspacePath,
+        workspacePath: projectRootPath,
+        installCwd: resolvedRoot.isMonorepo ? workspacePath : projectRootPath,
         installCommand: effectiveInstall,
         buildCommand: effectiveBuild,
         outputDirectory: effectiveOutput,
@@ -257,7 +276,7 @@ export class DeploymentWorkerService {
         artifactPath: buildResult.artifactPath,
         envVars: runtimeEnv,
         isRuntime,
-        workspacePath,
+        workspacePath: projectRootPath,
         onLog: appendLog,
       });
 
@@ -282,6 +301,23 @@ export class DeploymentWorkerService {
           completedAt: new Date(),
         },
       });
+
+      // Promote to active deployment for this project
+      try {
+        await prisma.project.update({
+          where: { id: data.projectId },
+          data: { activeDeploymentId: data.deploymentId },
+        });
+      } catch (projErr) {
+        this.logger.warn(`Could not update project activeDeploymentId: ${projErr}`);
+      }
+
+      // Stop older runtimes for this project now that the new deployment is healthy
+      try {
+        await RuntimeProcessManager.getInstance().stopProjectRuntimesExcept(data.projectId, data.deploymentId);
+      } catch (stopErr) {
+        this.logger.warn(`Could not stop older project runtimes: ${stopErr}`);
+      }
 
       // Record build artifact record
       await prisma.buildArtifact.create({
@@ -372,8 +408,12 @@ export class DeploymentWorkerService {
           windowsHide: true,
         });
 
-        const timer = setTimeout(() => {
-          child.kill('SIGKILL');
+        const timer = setTimeout(async () => {
+          if (child.pid) {
+            await killProcessTree(child.pid);
+          } else {
+            child.kill('SIGKILL');
+          }
           onLog(LogLevel.ERROR, BuildStage.PREPARE, 'Git operation timed out after 120 seconds');
         }, 120000);
 
