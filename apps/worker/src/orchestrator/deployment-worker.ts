@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { Worker, Job } from 'bullmq';
 import { prisma, LogLevel, BuildStage } from '@deployforge/database';
 import {
@@ -9,11 +10,13 @@ import {
   HostingProviderType,
   DeploymentStatus,
 } from '@deployforge/shared-types';
-import { SecretRedactor, AppLogger } from '@deployforge/logging';
+import { SecretRedactor, AppLogger, sanitizeLogContent } from '@deployforge/logging';
 import { loadConfig, decryptSecret, getRedisConnectionOptions } from '@deployforge/configuration';
 import { createBuildExecutor } from '../executors/build-executor';
-import { detectFramework } from '../frameworks/framework-detector';
-import { createHostingProvider } from '../providers/provider-factory';
+import { detectFramework, DeploymentMode } from '../frameworks/framework-detector';
+import { createHostingProvider, safeDeleteDirectory } from '../providers/provider-factory';
+import { diagnoseDeploymentError } from './error-diagnostics';
+import { RuntimeProcessManager } from '../runtime/runtime-manager';
 
 export class DeploymentWorkerService {
   private worker!: Worker;
@@ -36,6 +39,10 @@ export class DeploymentWorkerService {
 
     this.worker.on('failed', (job, err) => {
       this.logger.error(`BullMQ job ${job?.id} failed: ${err.message}`);
+    });
+
+    this.worker.on('error', (err) => {
+      this.logger.error(`BullMQ worker Redis connection error: ${err.message}`);
     });
 
     this.logger.info('Deployment background worker successfully initialized and listening for jobs.');
@@ -97,7 +104,8 @@ export class DeploymentWorkerService {
     await appendLog(LogLevel.INFO, BuildStage.PREPARE, `Target commit: ${data.commitSha} on branch ${data.branch}`);
 
     // 3. Prepare workspace and decrypt environment variables
-    const workspacePath = path.resolve(config.BUILD_WORKSPACE_DIR, data.deploymentId);
+    let workspacePath = path.resolve(config.BUILD_WORKSPACE_DIR, data.deploymentId);
+    let isRuntime = false;
     fs.mkdirSync(workspacePath, { recursive: true });
 
     const redactor = new SecretRedactor();
@@ -122,25 +130,68 @@ export class DeploymentWorkerService {
 
       await appendLog(LogLevel.INFO, BuildStage.PREPARE, `Loaded ${envVars.length} project environment variables`);
 
-      // 4. Populate Workspace (Demo static site or git clone)
-      this.prepareWorkspaceFiles(workspacePath, data);
+      // 4. Clone actual repository
+      await appendLog(LogLevel.INFO, BuildStage.PREPARE, `Cloning repository: ${data.repoUrl} (branch: ${data.branch})`);
+      await this.cloneRepository(workspacePath, data, redactor, appendLog);
+      await appendLog(LogLevel.INFO, BuildStage.PREPARE, 'Repository clone completed successfully.');
 
       // 5. Framework and build detection
       const detected = detectFramework(workspacePath);
+      isRuntime = detected.deploymentMode === DeploymentMode.SSR_RUNTIME;
+
+      if (isRuntime) {
+        if (data.provider === HostingProviderType.CLOUDFLARE_PAGES) {
+          throw new Error(
+            "Next.js server-rendered application detected. The selected provider (Cloudflare Pages) supports static files only. Select a provider with Node.js runtime support (Local Testing) or configure this application for a compatible static export."
+          );
+        }
+        await appendLog(
+          LogLevel.INFO,
+          BuildStage.PREPARE,
+          'Next.js Server-Side Rendering (SSR) runtime mode detected. DeployForge will deploy and serve this application via an isolated Node.js application process.'
+        );
+
+      }
+
+      // Check for Prisma schema and ensure build-time database connectivity configuration
+      if (fs.existsSync(path.join(workspacePath, 'prisma', 'schema.prisma'))) {
+        if (!runtimeEnv['DATABASE_URL']) {
+          try {
+            const schemaContent = fs.readFileSync(path.join(workspacePath, 'prisma', 'schema.prisma'), 'utf8');
+            if (schemaContent.includes('provider = "postgresql"')) {
+              runtimeEnv['DATABASE_URL'] = 'postgresql://postgres:postgres@localhost:5432/event_manager?schema=public';
+            } else if (schemaContent.includes('provider = "mysql"')) {
+              runtimeEnv['DATABASE_URL'] = 'mysql://root:password@localhost:3306/event_manager';
+            } else if (schemaContent.includes('provider = "sqlite"')) {
+              runtimeEnv['DATABASE_URL'] = 'file:./dev.db';
+            }
+            await appendLog(
+              LogLevel.WARN,
+              BuildStage.PREPARE,
+              'Notice: No DATABASE_URL environment variable was defined for this project. Set DATABASE_URL in Project Settings -> Env Vars if your application requires database connectivity.'
+            );
+          } catch {
+            // Non-fatal
+          }
+        }
+      }
+
       let effectiveInstall = data.installCommand || detected.installCommand;
       let effectiveBuild = data.buildCommand || detected.buildCommand;
-      const effectiveOutput = data.outputDirectory || detected.outputDirectory;
 
-      // Prevent sandbox escapes or infinite dev server loops when workspace has no package.json
-      if (!fs.existsSync(path.join(workspacePath, 'package.json'))) {
-        if (effectiveBuild && effectiveBuild.toLowerCase().includes('npm')) {
-          await appendLog(LogLevel.WARN, BuildStage.PREPARE, `Skipped '${effectiveBuild}': no package.json in workspace`);
-          effectiveBuild = 'echo "Static build ready"';
-        }
-        if (effectiveInstall && effectiveInstall.toLowerCase().includes('npm')) {
-          effectiveInstall = 'echo "No dependencies to install"';
-        }
-      } else if (effectiveBuild && (effectiveBuild.includes('run dev') || effectiveBuild.trim() === 'npm start')) {
+      // Determine effective output directory based on framework heuristics
+      let effectiveOutput = detected.outputDirectory;
+      if (
+        data.outputDirectory &&
+        data.outputDirectory !== 'dist' &&
+        data.outputDirectory !== detected.outputDirectory &&
+        detected.deploymentMode !== DeploymentMode.SSR_RUNTIME
+      ) {
+        effectiveOutput = data.outputDirectory;
+      }
+
+      // Prevent dev servers from starting during build
+      if (effectiveBuild && (effectiveBuild.includes('run dev') || effectiveBuild.trim() === 'npm start')) {
         await appendLog(LogLevel.WARN, BuildStage.PREPARE, `Replacing '${effectiveBuild}' with 'npm run build' (dev servers do not terminate)`);
         effectiveBuild = 'npm run build';
       }
@@ -148,7 +199,7 @@ export class DeploymentWorkerService {
       await appendLog(
         LogLevel.INFO,
         BuildStage.PREPARE,
-        `Detected framework: ${detected.framework} (Output directory: ${effectiveOutput})`
+        `Detected framework: ${detected.framework} (Output directory: ${effectiveOutput}, Mode: ${detected.deploymentMode})`
       );
 
       // 6. Transition to BUILDING
@@ -171,16 +222,23 @@ export class DeploymentWorkerService {
       });
 
       if (!buildResult.success) {
+        const diagnostic = diagnoseDeploymentError(
+          BuildStage.BUILD,
+          buildResult.errorMessage || 'Build process failed',
+          { exitCode: buildResult.exitCode, outputDirectory: effectiveOutput }
+        );
         await prisma.deployment.update({
           where: { id: data.deploymentId },
           data: {
             status: DeploymentStatus.FAILED as any,
-            errorCode: 'BUILD_ERROR',
-            errorMessage: buildResult.errorMessage || 'Build process failed',
+            errorCode: diagnostic.category,
+            errorMessage: `${diagnostic.summary}: ${diagnostic.likelyCause}`,
             completedAt: new Date(),
           },
         });
-        await appendLog(LogLevel.ERROR, BuildStage.BUILD, `Deployment failed: ${buildResult.errorMessage}`);
+        await appendLog(LogLevel.ERROR, BuildStage.BUILD, `Deployment failed [${diagnostic.category}]: ${diagnostic.summary}`);
+        await appendLog(LogLevel.WARN, BuildStage.BUILD, `Likely cause: ${diagnostic.likelyCause}`);
+        await appendLog(LogLevel.INFO, BuildStage.BUILD, `Suggested action: ${diagnostic.suggestedAction}`);
         return;
       }
 
@@ -190,7 +248,7 @@ export class DeploymentWorkerService {
         data: { status: DeploymentStatus.DEPLOYING as any },
       });
 
-      await appendLog(LogLevel.INFO, BuildStage.DEPLOY, `Deploying artifacts via provider: ${data.provider}`);
+      await appendLog(LogLevel.INFO, BuildStage.DEPLOY, `Deploying artifacts via provider: ${data.provider} (Mode: ${detected.deploymentMode})`);
       const provider = createHostingProvider(data.provider as HostingProviderType);
 
       const deployResult = await provider.deploy({
@@ -198,6 +256,9 @@ export class DeploymentWorkerService {
         deploymentId: data.deploymentId,
         artifactPath: buildResult.artifactPath,
         envVars: runtimeEnv,
+        isRuntime,
+        workspacePath,
+        onLog: appendLog,
       });
 
       // 8. Transition to HEALTH_CHECKING
@@ -235,22 +296,28 @@ export class DeploymentWorkerService {
 
       await appendLog(LogLevel.INFO, BuildStage.DEPLOY, `Deployment succeeded! URL: ${deployResult.deploymentUrl}`);
     } catch (err: any) {
-      this.logger.error(`Deployment ${data.deploymentId} execution error: ${err.message}`);
+      const diagnostic = diagnoseDeploymentError(
+        BuildStage.SYSTEM,
+        err.message || 'Execution exception'
+      );
+      this.logger.error(`Deployment ${data.deploymentId} execution error [${diagnostic.category}]: ${err.message}`);
       await prisma.deployment.update({
         where: { id: data.deploymentId },
         data: {
           status: DeploymentStatus.FAILED as any,
-          errorCode: 'EXECUTION_EXCEPTION',
-          errorMessage: err.message,
+          errorCode: diagnostic.category,
+          errorMessage: `${diagnostic.summary}: ${diagnostic.likelyCause}`,
           completedAt: new Date(),
         },
       });
-      await appendLog(LogLevel.ERROR, BuildStage.SYSTEM, `Fatal error: ${err.message}`);
+      await appendLog(LogLevel.ERROR, BuildStage.SYSTEM, `Fatal error [${diagnostic.category}]: ${diagnostic.summary}`);
+      await appendLog(LogLevel.WARN, BuildStage.SYSTEM, `Likely cause: ${diagnostic.likelyCause}`);
+      await appendLog(LogLevel.INFO, BuildStage.SYSTEM, `Suggested action: ${diagnostic.suggestedAction}`);
     } finally {
-      // 10. Clean up workspace
+      // 10. Clean up temporary workspace (non-fatal, safe against Windows file locks)
       try {
-        if (fs.existsSync(workspacePath)) {
-          fs.rmSync(workspacePath, { recursive: true, force: true });
+        if (!isRuntime && fs.existsSync(workspacePath)) {
+          safeDeleteDirectory(workspacePath);
         }
       } catch (cleanupErr) {
         this.logger.warn(`Workspace cleanup error: ${cleanupErr}`);
@@ -258,41 +325,129 @@ export class DeploymentWorkerService {
     }
   }
 
-  private prepareWorkspaceFiles(workspacePath: string, data: DeploymentJobData): void {
-    // Scaffold initial index.html and package.json if not cloned from git
-    const distDir = path.join(workspacePath, 'dist');
-    fs.mkdirSync(distDir, { recursive: true });
+  private async cloneRepository(
+    workspacePath: string,
+    data: DeploymentJobData,
+    redactor: SecretRedactor,
+    onLog: (level: LogLevel, stage: BuildStage, message: string) => Promise<void>
+  ): Promise<void> {
+    const rawRepoUrl = data.repoUrl?.trim();
+    if (!rawRepoUrl) {
+      throw new Error('Repository URL is required but was not provided.');
+    }
 
-    const htmlContent = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>DeployForge Site: ${data.projectId}</title>
-  <style>
-    body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
-    .card { background: #1e293b; padding: 2.5rem; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); max-width: 600px; text-align: center; border: 1px solid #334155; }
-    h1 { color: #38bdf8; margin-top: 0; }
-    .badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 9999px; background: #0369a1; color: white; font-weight: 600; font-size: 0.875rem; margin-bottom: 1rem; }
-    pre { background: #0f172a; padding: 1rem; border-radius: 6px; text-align: left; overflow-x: auto; color: #94a3b8; font-size: 0.85rem; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="badge">DeployForge Deployment</div>
-    <h1>Built and Deployed Successfully</h1>
-    <p>This website was automatically built and deployed by DeployForge.</p>
-    <pre>
-Deployment ID: ${data.deploymentId}
-Commit SHA:    ${data.commitSha}
-Branch:        ${data.branch}
-Provider:      ${data.provider}
-Timestamp:     ${new Date().toISOString()}
-    </pre>
-  </div>
-</body>
-</html>`;
+    if (rawRepoUrl.startsWith('-')) {
+      throw new Error('Invalid repository URL: cannot start with a hyphen.');
+    }
 
-    fs.writeFileSync(path.join(distDir, 'index.html'), htmlContent, 'utf8');
+    const isValidUrl =
+      /^(https?:\/\/|git@|git:\/\/|file:\/\/)/i.test(rawRepoUrl) ||
+      path.isAbsolute(rawRepoUrl);
+
+    if (!isValidUrl) {
+      throw new Error(`Unsupported repository URL scheme: ${rawRepoUrl}`);
+    }
+
+    const branch = data.branch?.trim() || 'main';
+    if (branch.startsWith('-') || !/^[a-zA-Z0-9._/-]+$/.test(branch)) {
+      throw new Error(`Invalid branch name: ${branch}`);
+    }
+
+    const isSpecificCommit =
+      data.commitSha &&
+      data.commitSha !== '0000000000000000000000000000000000000000' &&
+      /^[a-fA-F0-9]{7,40}$/.test(data.commitSha);
+
+    const runGit = (args: string[], cwd?: string): Promise<{ exitCode: number; stderr: string; stdout: string }> => {
+      return new Promise((resolve) => {
+        let stdout = '';
+        let stderr = '';
+        const child = spawn('git', args, {
+          cwd: cwd || process.cwd(),
+          env: {
+            ...process.env,
+            GIT_TERMINAL_PROMPT: '0',
+            GIT_ASKPASS: 'echo',
+          },
+          windowsHide: true,
+        });
+
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL');
+          onLog(LogLevel.ERROR, BuildStage.PREPARE, 'Git operation timed out after 120 seconds');
+        }, 120000);
+
+        child.stdout?.on('data', async (chunk: Buffer) => {
+          const text = chunk.toString('utf8');
+          stdout += text;
+          const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+          for (const line of lines) {
+            await onLog(LogLevel.INFO, BuildStage.PREPARE, sanitizeLogContent(redactor.redact(line)));
+          }
+        });
+
+        child.stderr?.on('data', async (chunk: Buffer) => {
+          const text = chunk.toString('utf8');
+          stderr += text;
+          const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+          for (const line of lines) {
+            await onLog(LogLevel.INFO, BuildStage.PREPARE, sanitizeLogContent(redactor.redact(line)));
+          }
+        });
+
+        child.on('close', (code) => {
+          clearTimeout(timer);
+          resolve({ exitCode: code ?? 1, stdout, stderr });
+        });
+
+        child.on('error', async (err) => {
+          clearTimeout(timer);
+          await onLog(LogLevel.ERROR, BuildStage.PREPARE, `Git execution error: ${err.message}`);
+          resolve({ exitCode: 1, stdout, stderr: err.message });
+        });
+      });
+    };
+
+    // Clean workspace directory before clone
+    fs.rmSync(workspacePath, { recursive: true, force: true });
+    fs.mkdirSync(workspacePath, { recursive: true });
+
+    // Attempt shallow branch clone first
+    await onLog(LogLevel.INFO, BuildStage.PREPARE, `Cloning branch '${branch}'...`);
+    let cloneRes = await runGit(['clone', '--depth', '1', '--branch', branch, '--', rawRepoUrl, workspacePath]);
+
+    // If shallow branch clone failed, retry standard clone
+    if (cloneRes.exitCode !== 0) {
+      await onLog(LogLevel.WARN, BuildStage.PREPARE, 'Shallow branch clone failed, attempting standard clone...');
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+      fs.mkdirSync(workspacePath, { recursive: true });
+      cloneRes = await runGit(['clone', '--', rawRepoUrl, workspacePath]);
+      if (cloneRes.exitCode !== 0) {
+        throw new Error(`Git clone failed with exit code ${cloneRes.exitCode}: ${sanitizeLogContent(redactor.redact(cloneRes.stderr))}`);
+      }
+      const checkoutRes = await runGit(['checkout', branch], workspacePath);
+      if (checkoutRes.exitCode !== 0) {
+        await onLog(LogLevel.WARN, BuildStage.PREPARE, `Could not checkout branch '${branch}', using default checkout`);
+      }
+    }
+
+    // Checkout specific commit SHA if requested
+    if (isSpecificCommit) {
+      await onLog(LogLevel.INFO, BuildStage.PREPARE, `Checking out target commit: ${data.commitSha}`);
+      const checkoutShaRes = await runGit(['checkout', data.commitSha], workspacePath);
+      if (checkoutShaRes.exitCode !== 0) {
+        await runGit(['fetch', '--depth', '1', 'origin', data.commitSha], workspacePath);
+        const retrySha = await runGit(['checkout', data.commitSha], workspacePath);
+        if (retrySha.exitCode !== 0) {
+          throw new Error(`Target commit SHA ${data.commitSha} could not be checked out.`);
+        }
+      }
+    }
+
+    // Verify workspace is not empty
+    const clonedFiles = fs.readdirSync(workspacePath);
+    if (clonedFiles.length === 0 || (clonedFiles.length === 1 && clonedFiles[0] === '.git')) {
+      throw new Error('Cloned repository contains no application files.');
+    }
   }
 }

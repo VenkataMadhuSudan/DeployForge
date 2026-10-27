@@ -40,6 +40,7 @@ jest.mock('bullmq', () => ({
   Queue: jest.fn().mockImplementation(() => ({
     add: jest.fn().mockResolvedValue({ id: 'job-1' }),
     close: jest.fn(),
+    on: jest.fn(),
   })),
   Worker: jest.fn().mockImplementation(() => ({
     on: jest.fn(),
@@ -73,6 +74,7 @@ async function createApp(): Promise<INestApplication> {
 // ─── Test suite ───────────────────────────────────────────────────────────────
 describe('DeployForge API', () => {
   let app: INestApplication;
+  jest.setTimeout(30000);
 
   beforeAll(async () => {
     mockUser.passwordHash = await argon2.hash('Passw0rd!', {

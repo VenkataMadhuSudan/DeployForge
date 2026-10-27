@@ -116,6 +116,9 @@ export interface HostingProviderAdapter {
     artifactPath: string;
     customDomain?: string;
     envVars?: Record<string, string>;
+    isRuntime?: boolean;
+    workspacePath?: string;
+    onLog?: (level: any, stage: any, message: string) => Promise<void>;
   }): Promise<DeploymentResult>;
   getStatus(providerDeploymentId: string): Promise<{
     status: 'READY' | 'BUILDING' | 'ERROR';

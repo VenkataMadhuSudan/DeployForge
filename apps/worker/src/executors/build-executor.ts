@@ -100,10 +100,53 @@ export class ProcessBuildExecutor implements BuildExecutor {
       };
     }
 
+    const stat = fs.statSync(artifactPath);
+    if (!stat.isDirectory()) {
+      return {
+        success: false,
+        artifactPath: '',
+        exitCode: 1,
+        durationMs: Date.now() - startTime,
+        errorMessage: `Artifact output path '${input.outputDirectory}' is not a directory`,
+      };
+    }
+
+    const dirContents = fs.readdirSync(artifactPath).filter((f) => f !== '.git');
+    if (dirContents.length === 0) {
+      return {
+        success: false,
+        artifactPath: '',
+        exitCode: 1,
+        durationMs: Date.now() - startTime,
+        errorMessage: `Artifact output directory '${input.outputDirectory}' is empty`,
+      };
+    }
+
+    const isNextJsSsr =
+      input.outputDirectory === '.next' ||
+      fs.existsSync(path.join(artifactPath, 'BUILD_ID')) ||
+      fs.existsSync(path.join(artifactPath, 'server'));
+    const hasIndexHtml = fs.existsSync(path.join(artifactPath, 'index.html'));
+
+    if (!isNextJsSsr && !hasIndexHtml) {
+      await input.onLog(
+        LogLevel.ERROR,
+        BuildStage.BUILD,
+        `Build output in '${input.outputDirectory}' does not contain an 'index.html' entry point`
+      );
+      return {
+        success: false,
+        artifactPath: '',
+        exitCode: 1,
+        durationMs: Date.now() - startTime,
+        errorMessage: `Entry point 'index.html' not found in build output directory '${input.outputDirectory}'`,
+      };
+    }
+
     await input.onLog(
       LogLevel.INFO,
       BuildStage.BUILD,
-      `Build completed successfully. Validated artifact directory at ${input.outputDirectory}`
+      `Build completed successfully. Validated artifact directory at ${input.outputDirectory} (${dirContents.length} files/directories found)`
     );
 
     return {
@@ -127,13 +170,49 @@ export class ProcessBuildExecutor implements BuildExecutor {
       const shell = isWindows ? 'cmd.exe' : '/bin/sh';
       const shellArgs = isWindows ? ['/d', '/s', '/c', commandStr] : ['-c', commandStr];
 
+      // Sanitize environment:
+      // Strip parent monorepo and pnpm/npm wrapper variables that disrupt child builds
+      // (e.g. npm_config_allow_scripts from ~/.npmrc, npm_config_recursive, npm_config_stream, etc.)
+      const sanitizedProcessEnv: Record<string, string> = {};
+      for (const [key, value] of Object.entries(process.env)) {
+        if (value === undefined) continue;
+        const lowerKey = key.toLowerCase();
+        if (
+          lowerKey.startsWith('npm_config_') ||
+          lowerKey.startsWith('npm_package_') ||
+          lowerKey.startsWith('npm_lifecycle_') ||
+          lowerKey === 'npm_command' ||
+          lowerKey === 'node_env'
+        ) {
+          continue;
+        }
+        sanitizedProcessEnv[key] = value;
+      }
+
+      // Isolate npm userconfig so user's ~/.npmrc (e.g. allow-scripts) does not crash npm 11
+      const localNpmrc = path.join(cwd, '.npmrc');
+      const cleanNpmrc = fs.existsSync(localNpmrc)
+        ? localNpmrc
+        : path.resolve(cwd, '../.deployforge-empty.npmrc');
+      if (!fs.existsSync(cleanNpmrc)) {
+        try {
+          fs.writeFileSync(
+            cleanNpmrc,
+            '# DeployForge isolated npm configuration\nfund=false\naudit=false\n'
+          );
+        } catch {
+          // non-fatal
+        }
+      }
+
       const child = spawn(shell, shellArgs, {
         cwd,
         env: {
-          ...process.env,
+          ...sanitizedProcessEnv,
           ...env,
+          npm_config_userconfig: cleanNpmrc,
           CI: 'true',
-          NODE_ENV: 'production',
+          NODE_ENV: stage === BuildStage.INSTALL ? 'development' : (env.NODE_ENV || 'production'),
         },
         windowsHide: true,
       });
@@ -230,14 +309,36 @@ export class DockerBuildExecutor implements BuildExecutor {
       await container.remove({ force: true });
 
       const artifactPath = path.resolve(input.workspacePath, input.outputDirectory);
-      const success = waitResult.StatusCode === 0 && fs.existsSync(artifactPath);
+      const exists = fs.existsSync(artifactPath);
+      const isDir = exists && fs.statSync(artifactPath).isDirectory();
+      const hasFiles = isDir && fs.readdirSync(artifactPath).filter((f) => f !== '.git').length > 0;
+      const hasIndex = isDir && fs.existsSync(path.join(artifactPath, 'index.html'));
+      const isNextJsSsr =
+        input.outputDirectory === '.next' ||
+        (isDir &&
+          (fs.existsSync(path.join(artifactPath, 'BUILD_ID')) ||
+            fs.existsSync(path.join(artifactPath, 'server'))));
+      const hasValidEntry = isDir && (hasIndex || isNextJsSsr);
+
+      const success = waitResult.StatusCode === 0 && exists && isDir && hasFiles && hasValidEntry;
+
+      let errorMessage: string | undefined;
+      if (waitResult.StatusCode !== 0) {
+        errorMessage = `Build container exited with code ${waitResult.StatusCode}`;
+      } else if (!exists || !isDir) {
+        errorMessage = `Build output directory '${input.outputDirectory}' was not generated by Docker build`;
+      } else if (!hasFiles) {
+        errorMessage = `Build output directory '${input.outputDirectory}' is empty`;
+      } else if (!hasValidEntry) {
+        errorMessage = `Entry point 'index.html' not found in build output directory '${input.outputDirectory}'`;
+      }
 
       return {
         success,
         artifactPath,
         exitCode: waitResult.StatusCode,
         durationMs: Date.now() - startTime,
-        errorMessage: success ? undefined : `Build container exited with code ${waitResult.StatusCode}`,
+        errorMessage,
       };
     } catch (err: any) {
       await input.onLog(LogLevel.ERROR, BuildStage.SYSTEM, `Docker executor failure: ${err.message}`);

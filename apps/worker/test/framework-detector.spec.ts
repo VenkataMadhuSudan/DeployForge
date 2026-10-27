@@ -131,6 +131,59 @@ describe('detectFramework() — generic node build', () => {
   });
 });
 
+// ─── Create React App detection ───────────────────────────────────────────────
+describe('detectFramework() — Create React App', () => {
+  it('detects CRA from react-scripts and outputs to build', () => {
+    const dir = makeTmpDir();
+    writeJson(dir, 'package.json', {
+      dependencies: { react: '^18.2.0', 'react-scripts': '5.0.1' },
+      scripts: { build: 'react-scripts build' },
+    });
+    const result = detectFramework(dir);
+    expect(result.framework).toBe(ProjectFramework.STATIC);
+    expect(result.outputDirectory).toBe('build');
+    expect(result.isServerRendered).toBe(false);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ─── Next.js static export vs SSR detection ──────────────────────────────────
+describe('detectFramework() — Next.js static export vs SSR', () => {
+  it('detects Next.js static export when next.config.js has output: export', () => {
+    const dir = makeTmpDir();
+    writeJson(dir, 'package.json', { dependencies: { next: '14.0.0' } });
+    fs.writeFileSync(path.join(dir, 'next.config.js'), "module.exports = { output: 'export' };");
+    const result = detectFramework(dir);
+    expect(result.framework).toBe(ProjectFramework.NEXTJS);
+    expect(result.outputDirectory).toBe('out');
+    expect(result.isServerRendered).toBe(false);
+    expect(result.deploymentMode).toBe('STATIC');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('detects Next.js SSR when output: export is absent', () => {
+    const dir = makeTmpDir();
+    writeJson(dir, 'package.json', { dependencies: { next: '14.0.0' } });
+    const result = detectFramework(dir);
+    expect(result.framework).toBe(ProjectFramework.NEXTJS);
+    expect(result.outputDirectory).toBe('.next');
+    expect(result.isServerRendered).toBe(true);
+    expect(result.deploymentMode).toBe('SSR_RUNTIME');
+    expect(result.startCommand).toBe('next start');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('detects Prisma schema and appends npx prisma generate to installCommand', () => {
+    const dir = makeTmpDir();
+    writeJson(dir, 'package.json', { dependencies: { next: '14.0.0', '@prisma/client': '^5.0.0' } });
+    fs.mkdirSync(path.join(dir, 'prisma'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'prisma', 'schema.prisma'), 'datasource db { provider = "postgresql" }');
+    const result = detectFramework(dir);
+    expect(result.installCommand).toContain('npx prisma generate');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 // ─── Malformed package.json ───────────────────────────────────────────────────
 describe('detectFramework() — error resilience', () => {
   it('falls back to STATIC when package.json is invalid JSON', () => {
@@ -141,3 +194,4 @@ describe('detectFramework() — error resilience', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+

@@ -6,7 +6,7 @@
   "packageManager": "pnpm@10.5.2",
   "scripts": {
     "build": "pnpm --filter \"./packages/*\" build && pnpm --filter \"./apps/*\" build",
-    "dev": "pnpm --parallel dev",
+    "dev": "pnpm --filter \"./apps/*\" --parallel dev",
     "dev:api": "pnpm --filter @deployforge/api dev",
     "dev:worker": "pnpm --filter @deployforge/worker dev",
     "dev:web": "pnpm --filter @deployforge/web dev",

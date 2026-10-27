@@ -78,6 +78,9 @@ services:
       HOSTING_PROVIDER: LOCAL_TESTING
       BUILD_WORKSPACE_DIR: /app/storage/workspaces
       ARTIFACT_STORAGE_DIR: /app/storage/artifacts
+      LOCAL_DEPLOYMENT_PORT: 8080
+    ports:
+      - "8080:8080"
     volumes:
       - storage_data:/app/storage
       # Worker can invoke Docker via socket only when running on Linux host with proper group permissions

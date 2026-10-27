@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, OnModuleDestroy } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import { prisma, Deployment } from '@deployforge/database';
 import { TriggerDeploymentSchema } from '@deployforge/validation';
@@ -12,7 +12,7 @@ import {
 import { loadConfig, getRedisConnectionOptions } from '@deployforge/configuration';
 
 @Injectable()
-export class DeploymentsService {
+export class DeploymentsService implements OnModuleDestroy {
   private queue: Queue;
 
   constructor() {
@@ -29,6 +29,20 @@ export class DeploymentsService {
         removeOnFail: 500,
       },
     });
+
+    if (typeof this.queue.on === 'function') {
+      this.queue.on('error', (err) => {
+        console.warn('BullMQ deployments queue Redis connection warning:', err?.message || err);
+      });
+    }
+  }
+
+  async onModuleDestroy() {
+    try {
+      await this.queue.close();
+    } catch {
+      // Non-fatal on shutdown
+    }
   }
 
   async triggerDeployment(
