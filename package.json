@@ -15,12 +15,22 @@
     "db:generate": "pnpm --filter @deployforge/database generate",
     "db:migrate": "pnpm --filter @deployforge/database migrate",
     "db:push": "pnpm --filter @deployforge/database push",
-    "db:seed": "pnpm --filter @deployforge/database seed"
+    "db:seed": "pnpm --filter @deployforge/database seed",
+    "reset:data": "tsx scripts/reset-all-data.ts"
   },
   "devDependencies": {
+    "@deployforge/configuration": "workspace:*",
+    "@deployforge/database": "workspace:*",
+    "@deployforge/logging": "workspace:*",
+    "@deployforge/shared-types": "workspace:*",
+    "@prisma/client": "^6.3.1",
     "@types/jest": "^29.5.14",
     "@types/node": "^22.13.0",
+    "bullmq": "^5.40.4",
+    "dotenv": "^16.4.7",
+    "ioredis": "^5.4.2",
     "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }
 }

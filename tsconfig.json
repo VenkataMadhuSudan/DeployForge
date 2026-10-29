@@ -1,7 +1,15 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "baseUrl": "."
+    "baseUrl": ".",
+    "paths": {
+      "@deployforge/configuration": ["packages/configuration/src"],
+      "@deployforge/database": ["packages/database/src"],
+      "@deployforge/logging": ["packages/logging/src"],
+      "@deployforge/shared-types": ["packages/shared-types/src"],
+      "@deployforge/validation": ["packages/validation/src"]
+    }
   },
+  "include": ["scripts/**/*"],
   "exclude": ["node_modules", "dist", ".next", "apps", "packages"]
 }
